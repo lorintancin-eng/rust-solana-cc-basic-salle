@@ -1,0 +1,4 @@
+﻿backup_created_at=2026-06-15T22:12:46.8484993+08:00
+source_ref=origin/main
+commit=c4ee5fe1a56e3641f8ea090f9c64907c0e2c2f97
+commit_info=c4ee5fe1a56e3641f8ea090f9c64907c0e2c2f97 2026-05-15 01:42:30 +0800 filter: route social_link check through GMGN (Metaplex-via-RPC is structurally broken for pre-exec mints)
