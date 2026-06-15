@@ -3,18 +3,15 @@ use solana_client::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use spl_associated_token_account::get_associated_token_address;
 use std::collections::HashSet;
-use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use super::persistence;
 use super::position::{Position, PositionKey, PositionState, SellReason, SellSignal};
 use crate::config::AppConfig;
-use crate::dev_index::DevIndex;
 use crate::grpc::{AccountUpdate, BondingCurveCache};
-use crate::processor::pumpfun::BondingCurveState;
 use crate::utils::sol_price::SolUsdPrice;
 
 const MAX_AUTO_SELL_SIGNAL_ATTEMPTS: u32 = 5;
@@ -25,9 +22,6 @@ pub struct AutoSellManager {
     bc_cache: BondingCurveCache,
     rpc_client: Arc<RpcClient>,
     sol_usd: SolUsdPrice,
-    /// Optional dev profile index — when present, bonding curve `complete=true`
-    /// transitions trigger `DevIndex.record_migration(mint)` to feed condition ③.
-    dev_index: Option<Arc<DevIndex>>,
 }
 
 impl AutoSellManager {
@@ -43,14 +37,7 @@ impl AutoSellManager {
             bc_cache,
             rpc_client,
             sol_usd,
-            dev_index: None,
         }
-    }
-
-    /// Inject dev profile index. Called from main.rs at startup before
-    /// start_grpc_monitor so migrations are recorded automatically.
-    pub fn set_dev_index(&mut self, dev_index: Arc<DevIndex>) {
-        self.dev_index = Some(dev_index);
     }
 
     fn save(&self) {
@@ -263,8 +250,6 @@ impl AutoSellManager {
     ) -> tokio::task::JoinHandle<()> {
         let positions = self.positions.clone();
         let sol_usd = self.sol_usd.clone();
-        let bc_cache = self.bc_cache.clone();
-        let dev_index = self.dev_index.clone();
 
         tokio::spawn(async move {
             info!("Auto-sell monitor started (group-aware)");
@@ -273,22 +258,6 @@ impl AutoSellManager {
                 match update {
                     AccountUpdate::BondingCurve(bc_update) => {
                         let mint = bc_update.mint;
-
-                        // 反馈给 dev_index：
-                        //   (1) creator 已知 → 记录 dev created（幂等）
-                        //   (2) complete=true → 记录 dev migrated（幂等）
-                        if let Some(idx) = &dev_index {
-                            if let Some(creator) = bc_update.state.creator {
-                                if let Err(e) = idx.record_creation(creator, mint) {
-                                    debug!("dev_index.record_creation: {}", e);
-                                }
-                            }
-                            if bc_update.state.complete {
-                                if let Err(e) = idx.record_migration(mint) {
-                                    debug!("dev_index.record_migration: {}", e);
-                                }
-                            }
-                        }
                         let keys: Vec<PositionKey> = positions
                             .iter()
                             .filter(|entry| entry.key().token_mint == mint)
@@ -307,13 +276,7 @@ impl AutoSellManager {
                                     pos.update_price(current_price);
                                 }
 
-                                // Migration 优先：bonding curve 完成迁移时立即触发卖出
-                                if let Some(signal) =
-                                    Self::check_migration_exit(&pos, &bc_update.state)
-                                {
-                                    pos.last_migration_signal_at = Some(Instant::now());
-                                    Some(signal)
-                                } else if current_price > 0.0 {
+                                if current_price > 0.0 {
                                     Self::check_exit_conditions(&pos)
                                 } else {
                                     None
@@ -484,9 +447,7 @@ impl AutoSellManager {
                         };
 
                         let max_hold = pos.group.max_hold_seconds;
-                        // MaxLifetime 早期短路：disable_floor_sell=true 时跳过（2ev 策略"非迁移永不卖"）
-                        if !pos.group.disable_floor_sell
-                            && max_hold > 0
+                        if max_hold > 0
                             && pos.held_seconds() >= max_hold
                             && pos.can_sell()
                             && !pos.max_sell_attempts_reached(MAX_AUTO_SELL_SIGNAL_ATTEMPTS)
@@ -497,20 +458,13 @@ impl AutoSellManager {
                                 reason: SellReason::MaxLifetime,
                                 current_price: pos.current_price,
                                 pnl_percent: pos.pnl_percent(),
-                                sell_ratio: 1.0,
                             })
                         } else if let Some(bc_state) = bc_cache.get(&pos.token_mint) {
                             let price = bc_state.price_sol();
                             if price > 0.0 {
                                 pos.update_price(price);
                             }
-                            // Migration 优先于其他出场条件
-                            if let Some(signal) = Self::check_migration_exit(&pos, &bc_state) {
-                                pos.last_migration_signal_at = Some(Instant::now());
-                                Some(signal)
-                            } else {
-                                Self::check_exit_conditions(&pos)
-                            }
+                            Self::check_exit_conditions(&pos)
                         } else {
                             None
                         }
@@ -542,15 +496,11 @@ impl AutoSellManager {
         })
     }
 
-    /// 出场条件检查（不含 migration —— migration 由 check_migration_exit 单独处理）
     fn check_exit_conditions(pos: &Position) -> Option<SellSignal> {
         let pnl = pos.pnl_percent();
         let key = pos.key();
-        let floor_disabled = pos.group.disable_floor_sell;
 
-        // MaxLifetime：disable_floor_sell=true 时跳过（2ev 策略"非迁移永不卖"）
-        if !floor_disabled
-            && pos.group.max_hold_seconds > 0
+        if pos.group.max_hold_seconds > 0
             && pos.held_seconds() >= pos.group.max_hold_seconds
             && pos.can_sell()
             && !pos.max_sell_attempts_reached(MAX_AUTO_SELL_SIGNAL_ATTEMPTS)
@@ -561,7 +511,6 @@ impl AutoSellManager {
                 reason: SellReason::MaxLifetime,
                 current_price: pos.current_price,
                 pnl_percent: pnl,
-                sell_ratio: 1.0,
             });
         }
 
@@ -569,22 +518,16 @@ impl AutoSellManager {
             return None;
         }
 
-        // StopLoss：disable_floor_sell=true 时跳过
-        if !floor_disabled
-            && pos.can_check_stop_loss()
-            && pnl <= -pos.group.stop_loss_percent
-        {
+        if pos.can_check_stop_loss() && pnl <= -pos.group.stop_loss_percent {
             return Some(SellSignal {
                 position_key: key,
                 group_name: pos.group.name.clone(),
                 reason: SellReason::StopLoss,
                 current_price: pos.current_price,
                 pnl_percent: pnl,
-                sell_ratio: 1.0,
             });
         }
 
-        // TakeProfit：使用 take_profit_partial_ratio（默认 1.0 = 全卖）
         if pos.can_check_take_profit() && pnl >= pos.group.take_profit_percent {
             return Some(SellSignal {
                 position_key: key,
@@ -592,11 +535,9 @@ impl AutoSellManager {
                 reason: SellReason::TakeProfit,
                 current_price: pos.current_price,
                 pnl_percent: pnl,
-                sell_ratio: pos.group.take_profit_sell_ratio(),
             });
         }
 
-        // TrailingStop：使用 trailing_partial_sell_ratio（默认 1.0 = 全卖）
         if pos.can_check_take_profit()
             && pos.group.trailing_stop_percent > 0.0
             && pos.highest_price > 0.0
@@ -609,39 +550,9 @@ impl AutoSellManager {
                 reason: SellReason::TrailingStop,
                 current_price: pos.current_price,
                 pnl_percent: pnl,
-                sell_ratio: pos.group.trailing_sell_ratio(),
             });
         }
 
         None
-    }
-
-    /// Migration 出场检测：bonding curve `complete` 字段为 true 且组启用了 migration_exit
-    /// 与 check_exit_conditions 平级，由调用方在拥有 BondingCurveState 时调用
-    /// 冷却 30 秒避免 complete=true 后被持续刷新的账户事件反复触发
-    fn check_migration_exit(pos: &Position, bc_state: &BondingCurveState) -> Option<SellSignal> {
-        if !pos.group.migration_exit_enabled || !bc_state.complete {
-            return None;
-        }
-        if !pos.can_sell() {
-            return None;
-        }
-        if pos.max_sell_attempts_reached(MAX_AUTO_SELL_SIGNAL_ATTEMPTS) {
-            return None;
-        }
-        // 冷却：同一仓位 30 秒内不重复发 migration 信号
-        if let Some(last) = pos.last_migration_signal_at {
-            if last.elapsed() < std::time::Duration::from_secs(30) {
-                return None;
-            }
-        }
-        Some(SellSignal {
-            position_key: pos.key(),
-            group_name: pos.group.name.clone(),
-            reason: SellReason::MigrationCompleted,
-            current_price: pos.current_price,
-            pnl_percent: pos.pnl_percent(),
-            sell_ratio: pos.group.migration_sell_ratio(),
-        })
     }
 }

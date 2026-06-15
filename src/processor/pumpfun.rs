@@ -129,22 +129,22 @@ pub fn synth_sell_mirror_for_buy(
             .0;
 
     vec![
-        Pubkey::from_str(PUMPFUN_GLOBAL).unwrap(),              // 0
-        Pubkey::from_str(PUMPFUN_FEE_RECIPIENT).unwrap(),       // 1
-        *mint,                                                   // 2
-        bonding_curve,                                           // 3
-        associated_bonding_curve,                                // 4
-        Pubkey::default(),                                       // 5 placeholder
-        Pubkey::default(),                                       // 6 placeholder
-        system_program::id(),                                    // 7
-        creator_vault,                                           // 8 SELL layout
-        *token_program_id,                                       // 9 SELL layout
-        Pubkey::from_str(PUMPFUN_EVENT_AUTHORITY).unwrap(),     // 10
-        program_id,                                              // 11
-        Pubkey::from_str(PUMP_FEE_CONFIG_PDA).unwrap(),         // 12
-        Pubkey::from_str(PUMP_FEE_PROGRAM).unwrap(),            // 13
-        Pubkey::from_str(PUMP_BUYBACK_FEE_RECIPIENT).unwrap(),  // 14
-        *creator_authority,                                      // 15
+        Pubkey::from_str(PUMPFUN_GLOBAL).unwrap(),             // 0
+        Pubkey::from_str(PUMPFUN_FEE_RECIPIENT).unwrap(),      // 1
+        *mint,                                                 // 2
+        bonding_curve,                                         // 3
+        associated_bonding_curve,                              // 4
+        Pubkey::default(),                                     // 5 placeholder
+        Pubkey::default(),                                     // 6 placeholder
+        system_program::id(),                                  // 7
+        creator_vault,                                         // 8 SELL layout
+        *token_program_id,                                     // 9 SELL layout
+        Pubkey::from_str(PUMPFUN_EVENT_AUTHORITY).unwrap(),    // 10
+        program_id,                                            // 11
+        Pubkey::from_str(PUMP_FEE_CONFIG_PDA).unwrap(),        // 12
+        Pubkey::from_str(PUMP_FEE_PROGRAM).unwrap(),           // 13
+        Pubkey::from_str(PUMP_BUYBACK_FEE_RECIPIENT).unwrap(), // 14
+        *creator_authority,                                    // 15
     ]
 }
 
@@ -289,11 +289,8 @@ fn first_pubkey_mismatch_skipping(
     expected: &[Pubkey],
     skip: &[usize],
 ) -> Option<(usize, Pubkey, Pubkey)> {
-    actual
-        .iter()
-        .zip(expected.iter())
-        .enumerate()
-        .find_map(|(index, (actual_key, expected_key))| {
+    actual.iter().zip(expected.iter()).enumerate().find_map(
+        |(index, (actual_key, expected_key))| {
             if skip.contains(&index) {
                 return None;
             }
@@ -302,7 +299,8 @@ fn first_pubkey_mismatch_skipping(
             } else {
                 None
             }
-        })
+        },
+    )
 }
 
 pub struct PumpfunProcessor {
@@ -401,10 +399,7 @@ impl PumpfunProcessor {
         // 时 trade.source_wallet 是 wallet B（不同人），用外部 source_wallet 推
         // PDA 找不到 mirror 里 A 的 user_volume_accumulator 等。mirror[6] 才是
         // 该 mirror 真正的 user/signer，用它推 PDA 才能正确替换。
-        let effective_source = mirror_accounts
-            .get(6)
-            .copied()
-            .unwrap_or(*source_wallet);
+        let effective_source = mirror_accounts.get(6).copied().unwrap_or(*source_wallet);
         let replaced =
             Self::replace_user_pdas(mirror_accounts, &effective_source, &config.pubkey, user_ata);
 
@@ -426,9 +421,11 @@ impl PumpfunProcessor {
 
             // slot 9 (creator_vault) 和 slot 17 (creator_authority) 在 2026.05 协议
             // 升级后无法从 bonding curve 自行推导，必须信任 mirror。
-            if let Some((index, actual, expected_key)) =
-                first_pubkey_mismatch_skipping(&replaced, &expected, PUMPFUN_BUY_MIRROR_TRUSTED_SLOTS)
-            {
+            if let Some((index, actual, expected_key)) = first_pubkey_mismatch_skipping(
+                &replaced,
+                &expected,
+                PUMPFUN_BUY_MIRROR_TRUSTED_SLOTS,
+            ) {
                 anyhow::bail!(
                     "{} mismatch at [{}]: expected {}, got {}",
                     PUMPFUN_BUY_ACCOUNT_LABELS[index],
@@ -476,7 +473,10 @@ impl PumpfunProcessor {
             (13usize, user_volume_accumulator),
             (14usize, Pubkey::from_str(PUMP_FEE_CONFIG_PDA).unwrap()),
             (15usize, Pubkey::from_str(PUMP_FEE_PROGRAM).unwrap()),
-            (16usize, Pubkey::from_str(PUMP_BUYBACK_FEE_RECIPIENT).unwrap()),
+            (
+                16usize,
+                Pubkey::from_str(PUMP_BUYBACK_FEE_RECIPIENT).unwrap(),
+            ),
         ];
 
         for (index, expected_key) in partial_expectations {
@@ -506,8 +506,13 @@ impl PumpfunProcessor {
         max_sol_cost: u64,
     ) -> Result<Instruction> {
         let program_id = Pubkey::from_str(PUMPFUN_PROGRAM_ID).unwrap();
-        let account_keys =
-            self.build_buy_account_keys_standard(user, mint, user_ata, token_program_id, curve_state)?;
+        let account_keys = self.build_buy_account_keys_standard(
+            user,
+            mint,
+            user_ata,
+            token_program_id,
+            curve_state,
+        )?;
 
         let mut data = Vec::with_capacity(24);
         data.extend_from_slice(&BUY_DISCRIMINATOR);
@@ -735,7 +740,7 @@ impl PumpfunProcessor {
     /// `mirror_accounts` 可能来自三种来源的 target trade，长度不同：
     ///   - **新版 BUY**（target_钱包 BUY）：18 个，本函数直接转写
     ///   - **旧版 BUY**（pre-2026.05）：17 个，缺 creator_authority
-    ///   - **SELL**（反向跟单触发，2ev 卖时我们买）：16 个，layout 与 BUY 不同
+    ///   - **SELL**（目标钱包卖出时反向跟单买入）：16 个，layout 与 BUY 不同
     ///     - SELL: slot 7=system, 8=creator_vault, 9=token_program, 10=event_auth,
     ///             11=program, 12=fee_config, 13=fee_program, 14=buyback, 15=creator_authority
     ///     - BUY:  slot 7=system, 8=token_program, 9=creator_vault, 10=event_auth,
@@ -763,10 +768,7 @@ impl PumpfunProcessor {
         // 反向跟单 + 缓存复用：mirror[6] 才是该 mirror 真正的 user/signer。
         // 当 cached mirror 来自 wallet A 的 BUY、反向触发是 wallet B 的 SELL 时，
         // 外部 source_wallet（B）推不出 mirror 里 A 的 user_volume_accumulator。
-        let effective_source = mirror_accounts
-            .get(6)
-            .copied()
-            .unwrap_or(*source_wallet);
+        let effective_source = mirror_accounts.get(6).copied().unwrap_or(*source_wallet);
         // 替换用户特定的 PDA（user_volume_accumulator 等）+ slot 5/6 user/ata
         let replaced = Self::replace_user_pdas(mirror_accounts, &effective_source, user, user_ata);
         let n = replaced.len();
@@ -783,12 +785,7 @@ impl PumpfunProcessor {
         // 按 mirror 长度提取关键字段
         let (creator_vault, token_program_id, buyback, creator_authority) = match n {
             // 新版 BUY (18): slot 8=token_program, 9=creator_vault, 16=buyback, 17=creator_authority
-            n if n >= 18 => (
-                replaced[9],
-                replaced[8],
-                replaced[16],
-                replaced[17],
-            ),
+            n if n >= 18 => (replaced[9], replaced[8], replaced[16], replaced[17]),
             // 旧版 BUY (17): 同上但无 creator_authority → 必失败但保守占位
             17 => (
                 replaced[9],
@@ -797,12 +794,7 @@ impl PumpfunProcessor {
                 Pubkey::default(),
             ),
             // SELL (16): slot 8=creator_vault, 9=token_program, 14=buyback, 15=creator_authority
-            16 => (
-                replaced[8],
-                replaced[9],
-                replaced[14],
-                replaced[15],
-            ),
+            16 => (replaced[8], replaced[9], replaced[14], replaced[15]),
             // 其它异常长度：用占位（链上会拒绝，但不 panic）
             _ => (
                 Pubkey::default(),
@@ -821,33 +813,24 @@ impl PumpfunProcessor {
 
         // 标准 18-slot BUY layout
         let accounts = vec![
-            AccountMeta::new_readonly(global, false),                                       // 0  global
-            AccountMeta::new(fee_recipient, false),                                          // 1  fee_recipient
-            AccountMeta::new_readonly(mint, false),                                          // 2  mint
-            AccountMeta::new(bonding_curve, false),                                          // 3  bonding_curve
-            AccountMeta::new(associated_bc, false),                                          // 4  associated_bc
-            AccountMeta::new(*user_ata, false),                                              // 5  user_ata
-            AccountMeta::new(*user, true),                                                   // 6  user (signer)
-            AccountMeta::new_readonly(system_program::id(), false),                          // 7  system_program
-            AccountMeta::new_readonly(token_program_id, false),                              // 8  token_program
-            AccountMeta::new(creator_vault, false),                                          // 9  creator_vault
-            AccountMeta::new_readonly(
-                Pubkey::from_str(PUMPFUN_EVENT_AUTHORITY).unwrap(),
-                false,
-            ),                                                                               // 10 event_authority
-            AccountMeta::new_readonly(program_id, false),                                    // 11 program
-            AccountMeta::new(global_volume_accumulator, false),                              // 12 global_volume_acc
-            AccountMeta::new(user_volume_accumulator, false),                                // 13 user_volume_acc
-            AccountMeta::new_readonly(
-                Pubkey::from_str(PUMP_FEE_CONFIG_PDA).unwrap(),
-                false,
-            ),                                                                               // 14 fee_config
-            AccountMeta::new_readonly(
-                Pubkey::from_str(PUMP_FEE_PROGRAM).unwrap(),
-                false,
-            ),                                                                               // 15 fee_program
-            AccountMeta::new(buyback, false),                                                // 16 buyback_fee_recipient
-            AccountMeta::new(creator_authority, false),                                      // 17 creator_authority
+            AccountMeta::new_readonly(global, false), // 0  global
+            AccountMeta::new(fee_recipient, false),   // 1  fee_recipient
+            AccountMeta::new_readonly(mint, false),   // 2  mint
+            AccountMeta::new(bonding_curve, false),   // 3  bonding_curve
+            AccountMeta::new(associated_bc, false),   // 4  associated_bc
+            AccountMeta::new(*user_ata, false),       // 5  user_ata
+            AccountMeta::new(*user, true),            // 6  user (signer)
+            AccountMeta::new_readonly(system_program::id(), false), // 7  system_program
+            AccountMeta::new_readonly(token_program_id, false), // 8  token_program
+            AccountMeta::new(creator_vault, false),   // 9  creator_vault
+            AccountMeta::new_readonly(Pubkey::from_str(PUMPFUN_EVENT_AUTHORITY).unwrap(), false), // 10 event_authority
+            AccountMeta::new_readonly(program_id, false), // 11 program
+            AccountMeta::new(global_volume_accumulator, false), // 12 global_volume_acc
+            AccountMeta::new(user_volume_accumulator, false), // 13 user_volume_acc
+            AccountMeta::new_readonly(Pubkey::from_str(PUMP_FEE_CONFIG_PDA).unwrap(), false), // 14 fee_config
+            AccountMeta::new_readonly(Pubkey::from_str(PUMP_FEE_PROGRAM).unwrap(), false), // 15 fee_program
+            AccountMeta::new(buyback, false), // 16 buyback_fee_recipient
+            AccountMeta::new(creator_authority, false), // 17 creator_authority
         ];
 
         Instruction {
@@ -914,14 +897,14 @@ impl PumpfunProcessor {
         // breaking_fee_recipient（2026-04-28 cashback upgrade 后必传）。
         let (creator_vault, bc_v2, breaking_fee) = match mirror_accounts.len() {
             n if n >= 18 => (
-                mirror_accounts[9],   // BUY: creator_vault @ 9
-                mirror_accounts[16],  // BUY: bonding_curve_v2 @ 16
-                mirror_accounts[17],  // BUY: breaking_fee_recipient @ 17
+                mirror_accounts[9],  // BUY: creator_vault @ 9
+                mirror_accounts[16], // BUY: bonding_curve_v2 @ 16
+                mirror_accounts[17], // BUY: breaking_fee_recipient @ 17
             ),
             n if n >= 16 => (
-                mirror_accounts[8],   // SELL non-cashback: creator_vault @ 8
-                mirror_accounts[14],  // SELL non-cashback: bc_v2 @ 14
-                mirror_accounts[15],  // SELL non-cashback: break_fee @ 15
+                mirror_accounts[8],  // SELL non-cashback: creator_vault @ 8
+                mirror_accounts[14], // SELL non-cashback: bc_v2 @ 14
+                mirror_accounts[15], // SELL non-cashback: break_fee @ 15
             ),
             _ => {
                 // Fallback: 自推 bc_v2，break_fee 用常量
@@ -944,29 +927,20 @@ impl PumpfunProcessor {
         // Non-cashback: 16 accounts (skip user_vol)
         // Cashback: 17 accounts
         let mut accounts = vec![
-            AccountMeta::new_readonly(global, false),                                          // 0
-            AccountMeta::new(fee_recipient, false),                                            // 1
-            AccountMeta::new_readonly(mint, false),                                            // 2
-            AccountMeta::new(bonding_curve, false),                                            // 3
-            AccountMeta::new(assoc_bc, false),                                                 // 4
-            AccountMeta::new(*user_ata, false),                                                // 5
-            AccountMeta::new(*user, true),                                                     // 6 signer
-            AccountMeta::new_readonly(system_program::id(), false),                            // 7
-            AccountMeta::new(creator_vault, false),                                            // 8
-            AccountMeta::new_readonly(*token_program_id, false),                               // 9
-            AccountMeta::new_readonly(
-                Pubkey::from_str(PUMPFUN_EVENT_AUTHORITY).unwrap(),
-                false,
-            ),                                                                                 // 10
-            AccountMeta::new_readonly(program_id, false),                                      // 11
-            AccountMeta::new_readonly(
-                Pubkey::from_str(PUMP_FEE_CONFIG_PDA).unwrap(),
-                false,
-            ),                                                                                 // 12
-            AccountMeta::new_readonly(
-                Pubkey::from_str(PUMP_FEE_PROGRAM).unwrap(),
-                false,
-            ),                                                                                 // 13
+            AccountMeta::new_readonly(global, false),               // 0
+            AccountMeta::new(fee_recipient, false),                 // 1
+            AccountMeta::new_readonly(mint, false),                 // 2
+            AccountMeta::new(bonding_curve, false),                 // 3
+            AccountMeta::new(assoc_bc, false),                      // 4
+            AccountMeta::new(*user_ata, false),                     // 5
+            AccountMeta::new(*user, true),                          // 6 signer
+            AccountMeta::new_readonly(system_program::id(), false), // 7
+            AccountMeta::new(creator_vault, false),                 // 8
+            AccountMeta::new_readonly(*token_program_id, false),    // 9
+            AccountMeta::new_readonly(Pubkey::from_str(PUMPFUN_EVENT_AUTHORITY).unwrap(), false), // 10
+            AccountMeta::new_readonly(program_id, false), // 11
+            AccountMeta::new_readonly(Pubkey::from_str(PUMP_FEE_CONFIG_PDA).unwrap(), false), // 12
+            AccountMeta::new_readonly(Pubkey::from_str(PUMP_FEE_PROGRAM).unwrap(), false), // 13
         ];
         if is_cashback {
             // [14] user_volume_accumulator (OUR PDA, 不是 mirror 的)
@@ -977,8 +951,8 @@ impl PumpfunProcessor {
             .0;
             accounts.push(AccountMeta::new(user_vol, false));
         }
-        accounts.push(AccountMeta::new_readonly(bc_v2, false));      // [14] non-cashback / [15] cashback
-        accounts.push(AccountMeta::new(breaking_fee, false));        // [15] / [16]
+        accounts.push(AccountMeta::new_readonly(bc_v2, false)); // [14] non-cashback / [15] cashback
+        accounts.push(AccountMeta::new(breaking_fee, false)); // [15] / [16]
 
         Instruction {
             program_id,
@@ -1451,8 +1425,7 @@ impl PumpfunProcessor {
 
         debug!(
             "鎶ヤ环(鏍囧噯): {} SOL 鈫?{} tokens | mode=native",
-            config.buy_sol_amount,
-            token_amount,
+            config.buy_sol_amount, token_amount,
         );
 
         let buy_ix = self.build_buy_instruction_standard(

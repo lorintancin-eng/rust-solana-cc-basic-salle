@@ -1,8 +1,6 @@
 mod autosell;
 mod config;
 mod consensus;
-mod dev_index;
-mod filter;
 mod group_stats;
 mod groups;
 mod grpc;
@@ -27,9 +25,6 @@ use autosell::{AutoSellManager, Position, SellAccountSnapshot, SellReason, SellS
 use config::AppConfig;
 use consensus::engine::{BuySignal, ConsensusTrigger};
 use consensus::ConsensusEngine;
-use dev_index::{backfill as dev_backfill, DevIndex};
-use filter::dev_profile::DevProvider;
-use filter::{EntryFilters, FilterOutcome};
 use groups::{CopyGroup, GroupManager, ENTRY_MODE_SMART_BUY};
 use grpc::{AccountSubscriber, AccountUpdate, AtaBalanceCache, BondingCurveCache, GrpcSubscriber};
 use processor::prefetch::PrefetchCache;
@@ -367,53 +362,6 @@ async fn main() -> Result<()> {
     let prefetch_cache = Arc::new(PrefetchCache::new(bc_cache.clone()));
     let bc_fetches: BondingCurveFetches = Arc::new(DashMap::new());
 
-    // 2ev 反向跟单：进场过滤器（仅 SMART_SELL 路径生效，对 SMART_BUY 透明）
-    // 本地 dev 索引：sled 路径 ./dev_index/，启动后自动 spawn 48h 历史回扫。
-    let dev_index = match DevIndex::open("./dev_index") {
-        Ok(idx) => Some(Arc::new(idx)),
-        Err(err) => {
-            warn!("DevIndex open failed: {}; dev filter will be disabled", err);
-            None
-        }
-    };
-
-    // GMGN OpenAPI 优先：env GMGN_API_KEY 配置 → 走 GMGN（数据全、无需自建索引）
-    // 否则退回到本地 sled 索引（数据可能不全，filter 倾向 Pass）
-    let gmgn_provider = std::env::var("GMGN_API_KEY")
-        .ok()
-        .filter(|k| !k.trim().is_empty())
-        .and_then(|key| match filter::dev_profile_gmgn::GmgnProvider::new(key) {
-            Ok(p) => {
-                info!("GMGN dev provider enabled");
-                Some(Arc::new(p))
-            }
-            Err(e) => {
-                warn!("GMGN provider init failed: {}; falling back to local index", e);
-                None
-            }
-        });
-
-    let entry_filters = {
-        let base = EntryFilters::new(bc_cache.clone(), sol_usd.clone(), rpc_client.clone());
-        if let Some(gmgn) = gmgn_provider.as_ref() {
-            base.with_dev_provider(DevProvider::gmgn(gmgn.clone()))
-        } else if let Some(idx) = dev_index.as_ref() {
-            base.with_dev_provider(DevProvider::local_index(idx.clone()))
-        } else {
-            base
-        }
-    };
-
-    if let Some(idx) = dev_index.as_ref() {
-        // 48h 历史回扫：异步、不阻塞启动；标记 `_meta:backfill_done` 防重复
-        dev_backfill::spawn_backfill(idx.clone(), rpc_client.clone());
-        info!(
-            "DevIndex active: total_devs={} | backfill_done={}",
-            idx.total_devs(),
-            idx.is_backfill_done()
-        );
-    }
-
     let tx_sender = Arc::new(TxSender::new(
         config.rpc_url.clone(),
         config.secondary_rpc_url.clone(),
@@ -428,25 +376,24 @@ async fn main() -> Result<()> {
     let consensus_engine = Arc::new(ConsensusEngine::new());
     let _cleanup_task = consensus_engine.start_cleanup_task();
 
-    let auto_sell_manager = {
-        let mut mgr = AutoSellManager::new(
-            config.clone(),
-            bc_cache.clone(),
-            rpc_client.clone(),
-            sol_usd.clone(),
-        );
-        if let Some(idx) = dev_index.as_ref() {
-            mgr.set_dev_index(idx.clone());
-        }
-        Arc::new(mgr)
-    };
+    let auto_sell_manager = Arc::new(AutoSellManager::new(
+        config.clone(),
+        bc_cache.clone(),
+        rpc_client.clone(),
+        sol_usd.clone(),
+    ));
 
     // AUTO_START=true 时跳过 /start 等待，bot 启动后立即接收 trade。
     // 默认 false（保留 /start 安全门）；远程运维场景可设 true 让 systemd/nohup
     // 重启后自动恢复 running 状态。
     let auto_start = std::env::var("AUTO_START")
         .ok()
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false);
     let is_running = Arc::new(AtomicBool::new(auto_start));
     if auto_start {
@@ -547,10 +494,7 @@ async fn main() -> Result<()> {
     let candidate_cleanup_auto_sell = auto_sell_manager.clone();
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(
-                ACCOUNT_CANDIDATE_CLEANUP_INTERVAL_SECS,
-            ))
-            .await;
+            tokio::time::sleep(Duration::from_secs(ACCOUNT_CANDIDATE_CLEANUP_INTERVAL_SECS)).await;
             let active_mints = candidate_cleanup_auto_sell.get_open_position_mints();
             let pruned = candidate_cleanup_sub.prune_stale_candidate_mints(
                 &active_mints,
@@ -809,22 +753,21 @@ async fn main() -> Result<()> {
         // 完整 18-slot mirror，下游 build_buy_instruction_from_mirror 走 18-slot
         // path + replace_user_pdas 替换我们的 user_ata/user/user_volume_acc，
         // 真实的 creator_vault (slot 9) 和 creator_authority (slot 17) 直接来自链上。
-        let cached_mirror: Option<Vec<Pubkey>> = if trade.instruction_accounts.is_empty()
-            && trade.trade_origin.is_wrapper_cpi()
-        {
-            mirror_cache.get(&token_mint).map(|entry| {
-                let m = entry.value().clone();
-                info!(
-                    "Reuse cached mirror: mint={} ({} accs, wallet={})",
-                    &token_mint.to_string()[..12],
-                    m.len(),
-                    &trade.source_wallet.to_string()[..8],
-                );
-                m
-            })
-        } else {
-            None
-        };
+        let cached_mirror: Option<Vec<Pubkey>> =
+            if trade.instruction_accounts.is_empty() && trade.trade_origin.is_wrapper_cpi() {
+                mirror_cache.get(&token_mint).map(|entry| {
+                    let m = entry.value().clone();
+                    info!(
+                        "Reuse cached mirror: mint={} ({} accs, wallet={})",
+                        &token_mint.to_string()[..12],
+                        m.len(),
+                        &trade.source_wallet.to_string()[..8],
+                    );
+                    m
+                })
+            } else {
+                None
+            };
         let effective_mirror: &[Pubkey] = cached_mirror
             .as_deref()
             .unwrap_or(trade.instruction_accounts.as_slice());
@@ -861,10 +804,7 @@ async fn main() -> Result<()> {
                 // 若 cache 未命中且原始 mirror 也空 → 没有 creator_authority 数据
                 // → 当前 mint 是"冷启动"（我们未曾观察其 Direct BUY）→ 跳过该 trade，
                 // 等待这个 mint 的某次 Direct BUY 将 ca 写入缓存后再触发。
-                if !trade.is_buy
-                    && group.buy_on_smart_sell()
-                    && effective_mirror.is_empty()
-                {
+                if !trade.is_buy && group.buy_on_smart_sell() && effective_mirror.is_empty() {
                     debug!(
                         "Skip reverse buy [{}] {}: no creator_authority cached (cold mint)",
                         group.name,
@@ -873,29 +813,7 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
-                // 反向跟单（SMART_SELL）路径：执行 2ev 策略 5 条进场过滤
-                // SMART_BUY 路径保持原行为不过滤，避免影响现有跟单组
-                let filter_pass = if !trade.is_buy && group.buy_on_smart_sell() {
-                    match entry_filters.evaluate(&group, &token_mint, &trade.source_wallet) {
-                        FilterOutcome::Pass => true,
-                        FilterOutcome::Reject(reason) => {
-                            info!(
-                                "Entry filter rejected [{}] {} | wallet={} | {}",
-                                group.name,
-                                &token_mint.to_string()[..12],
-                                &trade.source_wallet.to_string()[..8],
-                                reason,
-                            );
-                            false
-                        }
-                    }
-                } else {
-                    true
-                };
-
-                if filter_pass {
-                    entry_groups.push(group.clone());
-                }
+                entry_groups.push(group.clone());
             }
 
             if !trade.execution_failed && !trade.is_buy && group.follow_sell_mode() {
@@ -911,7 +829,6 @@ async fn main() -> Result<()> {
                             reason: SellReason::FollowSell,
                             current_price: position.current_price,
                             pnl_percent: position.pnl_percent(),
-                            sell_ratio: 1.0,
                         });
                     }
                 }
@@ -922,7 +839,7 @@ async fn main() -> Result<()> {
             continue;
         }
 
-        for mut group in entry_groups {
+        for group in entry_groups {
             let target_instruction_data = if group.entry_mode == ENTRY_MODE_SMART_BUY {
                 trade.instruction_data.clone()
             } else {
@@ -933,24 +850,6 @@ async fn main() -> Result<()> {
                 && trade.sol_amount_lamports < group.min_target_buy_lamports()
             {
                 continue;
-            }
-
-            // USD 计价覆写：buy_usd_amount = Some(X) 时按实时 SOL/USD 折算
-            // SOL 计价（buy_usd_amount = None）保持原行为
-            if let Some(_usd) = group.buy_usd_amount {
-                let sol_price = sol_usd.get();
-                let effective_sol = group.effective_buy_sol_amount(sol_price);
-                if effective_sol > 0.0 && (effective_sol - group.buy_sol_amount).abs() > 1e-9 {
-                    debug!(
-                        "USD->SOL convert [{}]: ${} / ${:.2} = {:.4} SOL (was {:.4})",
-                        group.name,
-                        group.buy_usd_amount.unwrap_or(0.0),
-                        sol_price,
-                        effective_sol,
-                        group.buy_sol_amount,
-                    );
-                    group.buy_sol_amount = effective_sol;
-                }
             }
 
             if group.consensus_min_wallets <= 1 {
@@ -1137,32 +1036,36 @@ async fn execute_buy(
     if bc_state.is_none() && has_target_instruction {
         if let Some(prefetched) = prefetched.as_ref() {
             let mut sync_fetch_reason = None;
-            let should_sync_fetch =
-                if prefetched.mirror_accounts.is_empty() || !trade_origin.uses_mirror_accounts() {
-                    sync_fetch_reason = Some("native path requires bonding curve cache".to_string());
-                    true
-                } else {
-                    match pumpfun.validate_direct_mirror_buy_accounts(
-                        mint,
-                        &prefetched.user_ata,
-                        &prefetched.token_program,
-                        &prefetched.source_wallet,
-                        &prefetched.mirror_accounts,
-                        None,
-                        &config,
-                    ) {
-                        Ok(()) => false,
-                        Err(err) => {
-                            sync_fetch_reason =
-                                Some(format!("unsafe direct mirror without cache: {}", err));
-                            true
-                        }
+            let should_sync_fetch = if prefetched.mirror_accounts.is_empty()
+                || !trade_origin.uses_mirror_accounts()
+            {
+                sync_fetch_reason = Some("native path requires bonding curve cache".to_string());
+                true
+            } else {
+                match pumpfun.validate_direct_mirror_buy_accounts(
+                    mint,
+                    &prefetched.user_ata,
+                    &prefetched.token_program,
+                    &prefetched.source_wallet,
+                    &prefetched.mirror_accounts,
+                    None,
+                    &config,
+                ) {
+                    Ok(()) => false,
+                    Err(err) => {
+                        sync_fetch_reason =
+                            Some(format!("unsafe direct mirror without cache: {}", err));
+                        true
                     }
-                };
+                }
+            };
 
             if should_sync_fetch {
                 let sync_fetch_started = Instant::now();
-                match pumpfun.prefetch_bonding_curve(&prefetched.bonding_curve).await {
+                match pumpfun
+                    .prefetch_bonding_curve(&prefetched.bonding_curve)
+                    .await
+                {
                     Ok(state) => {
                         bc_cache.update(mint, state.clone());
                         bc_state = Some(state);
@@ -1223,11 +1126,11 @@ async fn execute_buy(
                             .map(|mirror| (mirror, token_amount)),
                         Err(err) => {
                             warn!(
-                                "Unsafe Pump.fun direct mirror [{}] {} | fallback=native | reason={}",
-                                group.name,
-                                &mint.to_string()[..12],
-                                err
-                            );
+                            "Unsafe Pump.fun direct mirror [{}] {} | fallback=native | reason={}",
+                            group.name,
+                            &mint.to_string()[..12],
+                            err
+                        );
                             pumpfun
                                 .buy_standard_from_cached_state(
                                     mint,
@@ -1561,9 +1464,8 @@ fn init_logging() {
     // 同时保留 `solana_copy_trader` 以防未来抽出 lib crate。
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                "info,copy_trader=debug,solana_copy_trader=debug".into()
-            }),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,copy_trader=debug,solana_copy_trader=debug".into()),
         )
         .with_target(false)
         .with_thread_ids(false)

@@ -34,38 +34,6 @@ pub struct CopyGroup {
     pub zero_slot_tip_lamports: u64,
     pub entry_mode: u8,
     pub sell_mode: u8,
-
-    // ============================================
-    // 2ev 反向跟单策略扩展字段
-    // 默认值都让现有跟单组保持原行为（None / false / 1.0）
-    // ============================================
-    /// 进场过滤①：入场时市值上限（USD）。None = 不过滤。
-    /// 策略推荐：Some(3000.0)
-    pub max_entry_mcap_usd: Option<f64>,
-    /// 进场过滤②：要求 token 至少有一个社交链接（Twitter/Telegram/Website）。
-    pub require_social_link: bool,
-    /// 进场过滤③：dev 历史毕业（migrated）token 数上限。None = 不过滤。
-    pub dev_max_open_count: Option<u32>,
-    /// 进场过滤④：dev 总创建 token 数上限。None = 不过滤。
-    pub dev_max_created_count: Option<u32>,
-    /// 进场过滤⑤：dev 推特绑定 token 数上限。None = 不过滤。
-    pub dev_max_twitter_bound: Option<u32>,
-    /// 出场扩展：禁用价格类强制卖出（StopLoss / MaxLifetime），让 pump.fun virtual reserves floor 自然兜底。
-    /// TrailingStop / TakeProfit / MigrationCompleted / FollowSell 仍然生效。
-    pub disable_floor_sell: bool,
-    /// 出场扩展：bonding curve 完成迁移时自动触发卖出。
-    pub migration_exit_enabled: bool,
-    /// 出场扩展：trailing stop 触发时卖出占比 (0.0, 1.0]。1.0 = 全卖（默认）。
-    /// 策略推荐：0.5 ~ 0.66（卖 ATH 的 1/2 ~ 2/3，留剩余博更高 ATH）
-    pub trailing_partial_sell_ratio: f64,
-    /// 出场扩展：take profit 触发时卖出占比 (0.0, 1.0]。1.0 = 全卖（默认）。
-    /// 策略推荐：0.5（50x 卖一半锁利）
-    pub take_profit_partial_ratio: f64,
-    /// 出场扩展：migration 触发时卖出占比 (0.0, 1.0]。1.0 = 全卖（默认）。
-    pub migration_exit_partial_ratio: f64,
-    /// USD 计价单笔仓位。Some 时**覆盖** `buy_sol_amount`，按 SolUsdPrice 实时折算。
-    /// None = 仍用 SOL 计价（旧组保持原行为）。
-    pub buy_usd_amount: Option<f64>,
 }
 
 impl CopyGroup {
@@ -90,45 +58,11 @@ impl CopyGroup {
             zero_slot_tip_lamports: config.zero_slot_tip_lamports,
             entry_mode: ENTRY_MODE_SMART_BUY,
             sell_mode: SELL_MODE_TP_SL,
-            // 2ev 策略字段：默认全部关闭/通过，保持现有跟单组原行为
-            max_entry_mcap_usd: None,
-            require_social_link: false,
-            dev_max_open_count: None,
-            dev_max_created_count: None,
-            dev_max_twitter_bound: None,
-            disable_floor_sell: false,
-            migration_exit_enabled: false,
-            trailing_partial_sell_ratio: 1.0,
-            take_profit_partial_ratio: 1.0,
-            migration_exit_partial_ratio: 1.0,
-            buy_usd_amount: None,
         }
     }
 
     pub fn buy_lamports(&self) -> u64 {
         (self.buy_sol_amount * 1_000_000_000.0) as u64
-    }
-
-    /// 根据当前 SOL/USD 价格计算实际下单的 SOL 数（lamports）：
-    /// - `buy_usd_amount = Some(x)` 且 sol_usd_price > 0 → `x / sol_usd_price * 1e9`
-    /// - 否则回退到 `buy_lamports()`
-    pub fn effective_buy_lamports(&self, sol_usd_price: f64) -> u64 {
-        if let Some(usd) = self.buy_usd_amount {
-            if usd > 0.0 && sol_usd_price > 0.0 {
-                return ((usd / sol_usd_price) * 1_000_000_000.0) as u64;
-            }
-        }
-        self.buy_lamports()
-    }
-
-    /// 根据当前 SOL/USD 价格反推 `buy_sol_amount` 等价值（SOL）
-    pub fn effective_buy_sol_amount(&self, sol_usd_price: f64) -> f64 {
-        if let Some(usd) = self.buy_usd_amount {
-            if usd > 0.0 && sol_usd_price > 0.0 {
-                return usd / sol_usd_price;
-            }
-        }
-        self.buy_sol_amount
     }
 
     pub fn min_target_buy_lamports(&self) -> u64 {
@@ -145,45 +79,6 @@ impl CopyGroup {
 
     pub fn buy_on_smart_sell(&self) -> bool {
         self.entry_mode == ENTRY_MODE_SMART_SELL
-    }
-
-    // ============================================
-    // 2ev 策略：进场过滤 / 出场扩展辅助方法
-    // ============================================
-
-    /// 是否启用市值上限过滤（条件①）
-    pub fn has_mcap_filter(&self) -> bool {
-        self.max_entry_mcap_usd.is_some_and(|v| v > 0.0)
-    }
-
-    /// 检查给定 USD 市值是否通过过滤；未启用过滤时直接返回 true
-    pub fn passes_mcap_filter(&self, mcap_usd: f64) -> bool {
-        match self.max_entry_mcap_usd {
-            Some(limit) if limit > 0.0 => mcap_usd > 0.0 && mcap_usd < limit,
-            _ => true,
-        }
-    }
-
-    /// 是否启用了任意 dev 画像过滤（条件③④⑤）
-    pub fn has_dev_filter(&self) -> bool {
-        self.dev_max_open_count.is_some()
-            || self.dev_max_created_count.is_some()
-            || self.dev_max_twitter_bound.is_some()
-    }
-
-    /// trailing stop 卖出占比（clamp 到 (0, 1]）
-    pub fn trailing_sell_ratio(&self) -> f64 {
-        self.trailing_partial_sell_ratio.clamp(0.0, 1.0).max(0.01)
-    }
-
-    /// take profit 卖出占比（clamp 到 (0, 1]）
-    pub fn take_profit_sell_ratio(&self) -> f64 {
-        self.take_profit_partial_ratio.clamp(0.0, 1.0).max(0.01)
-    }
-
-    /// migration 卖出占比（clamp 到 (0, 1]）
-    pub fn migration_sell_ratio(&self) -> f64 {
-        self.migration_exit_partial_ratio.clamp(0.0, 1.0).max(0.01)
     }
 
     pub fn to_app_config(&self, base: &AppConfig) -> AppConfig {
@@ -229,33 +124,6 @@ struct PersistedGroup {
     #[serde(default)]
     entry_mode: u8,
     sell_mode: u8,
-    // 2ev 策略字段：全部 #[serde(default)]，旧 copy_groups.json 仍可读
-    #[serde(default)]
-    max_entry_mcap_usd: Option<f64>,
-    #[serde(default)]
-    require_social_link: bool,
-    #[serde(default)]
-    dev_max_open_count: Option<u32>,
-    #[serde(default)]
-    dev_max_created_count: Option<u32>,
-    #[serde(default)]
-    dev_max_twitter_bound: Option<u32>,
-    #[serde(default)]
-    disable_floor_sell: bool,
-    #[serde(default)]
-    migration_exit_enabled: bool,
-    #[serde(default = "default_partial_ratio")]
-    trailing_partial_sell_ratio: f64,
-    #[serde(default = "default_partial_ratio")]
-    take_profit_partial_ratio: f64,
-    #[serde(default = "default_partial_ratio")]
-    migration_exit_partial_ratio: f64,
-    #[serde(default)]
-    buy_usd_amount: Option<f64>,
-}
-
-fn default_partial_ratio() -> f64 {
-    1.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -289,17 +157,6 @@ impl PersistedGroup {
             zero_slot_tip_lamports: Some(group.zero_slot_tip_lamports),
             entry_mode: group.entry_mode,
             sell_mode: group.sell_mode,
-            max_entry_mcap_usd: group.max_entry_mcap_usd,
-            require_social_link: group.require_social_link,
-            dev_max_open_count: group.dev_max_open_count,
-            dev_max_created_count: group.dev_max_created_count,
-            dev_max_twitter_bound: group.dev_max_twitter_bound,
-            disable_floor_sell: group.disable_floor_sell,
-            migration_exit_enabled: group.migration_exit_enabled,
-            trailing_partial_sell_ratio: group.trailing_partial_sell_ratio,
-            take_profit_partial_ratio: group.take_profit_partial_ratio,
-            migration_exit_partial_ratio: group.migration_exit_partial_ratio,
-            buy_usd_amount: group.buy_usd_amount,
         }
     }
 
@@ -334,17 +191,6 @@ impl PersistedGroup {
                 .unwrap_or(base.zero_slot_tip_lamports),
             entry_mode: self.entry_mode,
             sell_mode: self.sell_mode,
-            max_entry_mcap_usd: self.max_entry_mcap_usd,
-            require_social_link: self.require_social_link,
-            dev_max_open_count: self.dev_max_open_count,
-            dev_max_created_count: self.dev_max_created_count,
-            dev_max_twitter_bound: self.dev_max_twitter_bound,
-            disable_floor_sell: self.disable_floor_sell,
-            migration_exit_enabled: self.migration_exit_enabled,
-            trailing_partial_sell_ratio: self.trailing_partial_sell_ratio,
-            take_profit_partial_ratio: self.take_profit_partial_ratio,
-            migration_exit_partial_ratio: self.migration_exit_partial_ratio,
-            buy_usd_amount: self.buy_usd_amount,
         })
     }
 }

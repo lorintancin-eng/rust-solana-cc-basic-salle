@@ -1149,7 +1149,6 @@ impl TgBot {
                 reason: SellReason::Manual,
                 current_price: pos.current_price,
                 pnl_percent: pos.pnl_percent(),
-                sell_ratio: 1.0,
             });
         }
 
@@ -1408,119 +1407,8 @@ fn apply_group_setting_value(
             format!("状态 = {}", if enabled { "启用" } else { "停用" })
         }),
 
-        // ============================================
-        // 2ev 反向跟单策略字段
-        // ============================================
-        "max_mc" | "max_mcap" | "mcap_limit" => parse_optional_f64(value)
-            .map(|v| {
-                group.max_entry_mcap_usd = v;
-                match v {
-                    Some(limit) => format!("入场市值上限 = ${}", limit),
-                    None => "入场市值上限 = 关闭".to_string(),
-                }
-            }),
-        "buy_usd" | "buy_dollar" | "usd" => parse_optional_f64(value)
-            .map(|v| {
-                group.buy_usd_amount = v;
-                match v {
-                    Some(usd) => format!("单笔仓位 = ${}（按实时 SOL 价折算）", usd),
-                    None => "单笔仓位回到 SOL 计价（buy_sol_amount）".to_string(),
-                }
-            }),
-        "require_social" | "social" => parse_bool_flag(value).map(|enabled| {
-            group.require_social_link = enabled;
-            format!("要求社交链接 = {}", if enabled { "开" } else { "关" })
-        }),
-        "dev_open" | "dev_max_open" => parse_optional_u32(value)
-            .map(|v| {
-                group.dev_max_open_count = v;
-                match v {
-                    Some(n) => format!("dev 历史毕业上限 = {}", n),
-                    None => "dev 历史毕业上限 = 关闭".to_string(),
-                }
-            }),
-        "dev_created" | "dev_max_created" => parse_optional_u32(value)
-            .map(|v| {
-                group.dev_max_created_count = v;
-                match v {
-                    Some(n) => format!("dev 总创建上限 = {}", n),
-                    None => "dev 总创建上限 = 关闭".to_string(),
-                }
-            }),
-        "dev_tw" | "dev_max_twitter" => parse_optional_u32(value)
-            .map(|v| {
-                group.dev_max_twitter_bound = v;
-                match v {
-                    Some(n) => format!("dev 推特绑币上限 = {}", n),
-                    None => "dev 推特绑币上限 = 关闭".to_string(),
-                }
-            }),
-        "no_floor_sell" | "disable_floor" => parse_bool_flag(value).map(|enabled| {
-            group.disable_floor_sell = enabled;
-            format!("禁用价格强制卖出 = {}", if enabled { "开（非迁移永不卖）" } else { "关" })
-        }),
-        "migration_exit" | "exit_on_migration" => parse_bool_flag(value).map(|enabled| {
-            group.migration_exit_enabled = enabled;
-            format!("迁移完成时卖出 = {}", if enabled { "开" } else { "关" })
-        }),
-        "trailing_ratio" => value
-            .parse::<f64>()
-            .map(|v| {
-                let clamped = v.clamp(0.01, 1.0);
-                group.trailing_partial_sell_ratio = clamped;
-                format!("trailing 部分卖比例 = {:.2}", clamped)
-            })
-            .map_err(|err| err.to_string()),
-        "tp_ratio" => value
-            .parse::<f64>()
-            .map(|v| {
-                let clamped = v.clamp(0.01, 1.0);
-                group.take_profit_partial_ratio = clamped;
-                format!("止盈部分卖比例 = {:.2}", clamped)
-            })
-            .map_err(|err| err.to_string()),
-        "migration_ratio" => value
-            .parse::<f64>()
-            .map(|v| {
-                let clamped = v.clamp(0.01, 1.0);
-                group.migration_exit_partial_ratio = clamped;
-                format!("迁移部分卖比例 = {:.2}", clamped)
-            })
-            .map_err(|err| err.to_string()),
-
         _ => Err(format!("未知参数键: {}", key)),
     }
-}
-
-/// 解析可选 f64：空字符串 / "off" / "none" / "0" / "-" → None
-fn parse_optional_f64(value: &str) -> Result<Option<f64>, String> {
-    let trimmed = value.trim().to_ascii_lowercase();
-    if trimmed.is_empty()
-        || trimmed == "off"
-        || trimmed == "none"
-        || trimmed == "-"
-        || trimmed == "0"
-    {
-        return Ok(None);
-    }
-    value
-        .trim()
-        .parse::<f64>()
-        .map(|v| if v > 0.0 { Some(v) } else { None })
-        .map_err(|err| err.to_string())
-}
-
-/// 解析可选 u32：空字符串 / "off" / "none" / "-" → None
-fn parse_optional_u32(value: &str) -> Result<Option<u32>, String> {
-    let trimmed = value.trim().to_ascii_lowercase();
-    if trimmed.is_empty() || trimmed == "off" || trimmed == "none" || trimmed == "-" {
-        return Ok(None);
-    }
-    value
-        .trim()
-        .parse::<u32>()
-        .map(Some)
-        .map_err(|err| err.to_string())
 }
 
 fn parse_entry_mode(value: &str) -> Result<u8, String> {
@@ -1591,18 +1479,6 @@ fn setting_label(key: &str) -> &'static str {
         "tip_buy" => "买入小费",
         "tip_sell" => "卖出小费",
         "mode" => "卖出模式",
-        // 2ev 策略字段
-        "max_mc" | "max_mcap" | "mcap_limit" => "入场市值上限(USD)",
-        "buy_usd" | "buy_dollar" | "usd" => "单笔仓位(USD)",
-        "require_social" | "social" => "要求社交链接",
-        "dev_open" | "dev_max_open" => "dev 历史毕业上限",
-        "dev_created" | "dev_max_created" => "dev 总创建上限",
-        "dev_tw" | "dev_max_twitter" => "dev 推特绑币上限",
-        "no_floor_sell" | "disable_floor" => "禁用价格强卖",
-        "migration_exit" | "exit_on_migration" => "迁移卖出",
-        "trailing_ratio" => "trailing 卖出比例",
-        "tp_ratio" => "止盈卖出比例",
-        "migration_ratio" => "迁移卖出比例",
         _ => "参数",
     }
 }
@@ -2163,73 +2039,6 @@ fn format_group_detail_v2(group: &CopyGroup, selected: bool) -> String {
         group.tip_sell_lamports,
         group.zero_slot_tip_lamports,
     );
-
-    // 2ev 反向跟单策略字段（仅在启用任一项时显示，避免常规组冗长）
-    let has_strategy_config = group.max_entry_mcap_usd.is_some()
-        || group.require_social_link
-        || group.dev_max_open_count.is_some()
-        || group.dev_max_created_count.is_some()
-        || group.dev_max_twitter_bound.is_some()
-        || group.disable_floor_sell
-        || group.migration_exit_enabled
-        || group.trailing_partial_sell_ratio < 1.0
-        || group.take_profit_partial_ratio < 1.0
-        || group.migration_exit_partial_ratio < 1.0
-        || group.buy_usd_amount.is_some();
-    if has_strategy_config {
-        text.push_str("\n\n<b>2ev 策略配置</b>");
-        if let Some(usd) = group.buy_usd_amount {
-            text.push_str(&format!("\n单笔仓位(USD)：${}", usd));
-        }
-        if let Some(mc) = group.max_entry_mcap_usd {
-            text.push_str(&format!("\n入场市值上限：${}", mc));
-        }
-        if group.require_social_link {
-            text.push_str("\n要求社交链接：开 ⚠️(底层 TODO，未生效)");
-        }
-        if let Some(n) = group.dev_max_open_count {
-            text.push_str(&format!(
-                "\ndev 历史毕业上限：{} ⚠️(底层 TODO，未生效)",
-                n
-            ));
-        }
-        if let Some(n) = group.dev_max_created_count {
-            text.push_str(&format!(
-                "\ndev 总创建上限：{} ⚠️(底层 TODO，未生效)",
-                n
-            ));
-        }
-        if let Some(n) = group.dev_max_twitter_bound {
-            text.push_str(&format!(
-                "\ndev 推特绑币上限：{} ⚠️(底层 TODO，未生效)",
-                n
-            ));
-        }
-        if group.disable_floor_sell {
-            text.push_str("\n禁用价格强卖：开（非迁移永不卖）");
-        }
-        if group.migration_exit_enabled {
-            text.push_str("\n迁移完成卖出：开");
-        }
-        if group.trailing_partial_sell_ratio < 1.0 {
-            text.push_str(&format!(
-                "\ntrailing 卖出比例：{:.2}",
-                group.trailing_partial_sell_ratio
-            ));
-        }
-        if group.take_profit_partial_ratio < 1.0 {
-            text.push_str(&format!(
-                "\n止盈卖出比例：{:.2}",
-                group.take_profit_partial_ratio
-            ));
-        }
-        if group.migration_exit_partial_ratio < 1.0 {
-            text.push_str(&format!(
-                "\n迁移卖出比例：{:.2}",
-                group.migration_exit_partial_ratio
-            ));
-        }
-    }
 
     if group.wallets.is_empty() {
         text.push_str("\n监听钱包：暂无");

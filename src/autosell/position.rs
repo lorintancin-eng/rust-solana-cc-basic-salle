@@ -89,15 +89,9 @@ pub struct Position {
     pub sell_attempts: u32,
     pub zero_balance_sell_skips: u32,
 
-    // ============================================
-    // 部分卖 / migration 跟踪（2ev 反向跟单策略）
-    // ============================================
-    /// 已发生的部分卖次数（用于上限保护）
+    // 手动部分卖跟踪
     pub partial_sell_count: u32,
-    /// 上次部分卖时间戳（用于 trailing/TP 冷却）
     pub last_partial_sell_at: Option<Instant>,
-    /// 上次 migration_exit 触发时间戳（用于 migration 信号去重）
-    pub last_migration_signal_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -138,7 +132,6 @@ impl Position {
             zero_balance_sell_skips: 0,
             partial_sell_count: 0,
             last_partial_sell_at: None,
-            last_migration_signal_at: None,
         }
     }
 
@@ -393,8 +386,6 @@ pub enum SellReason {
     Manual,
     /// 跟聪明钱卖出（目标钱包卖出同一代币时触发）
     FollowSell,
-    /// Pump.fun bonding curve 完成迁移到 PumpSwap/外部 DEX
-    MigrationCompleted,
 }
 
 impl std::fmt::Display for SellReason {
@@ -406,7 +397,6 @@ impl std::fmt::Display for SellReason {
             SellReason::MaxLifetime => write!(f, "MAX_LIFETIME"),
             SellReason::Manual => write!(f, "MANUAL"),
             SellReason::FollowSell => write!(f, "FOLLOW_SELL"),
-            SellReason::MigrationCompleted => write!(f, "MIGRATION_COMPLETED"),
         }
     }
 }
@@ -419,8 +409,6 @@ pub struct SellSignal {
     pub reason: SellReason,
     pub current_price: f64,
     pub pnl_percent: f64,
-    /// 卖出占比 (0.0, 1.0]；1.0 = 全卖（默认行为），<1.0 触发部分卖路径
-    pub sell_ratio: f64,
 }
 
 impl SellSignal {
@@ -438,7 +426,6 @@ impl SellSignal {
             reason,
             current_price,
             pnl_percent,
-            sell_ratio: 1.0,
         }
     }
 }

@@ -1,0 +1,54 @@
+name: Build Copy Trader Linux
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BINARY_NAME: copy-trader
+  ARTIFACT_NAME: copy-trader-linux
+
+jobs:
+  build-linux:
+    name: Build Linux Artifact
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler pkg-config libssl-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        # Note: --locked omitted intentionally — local Windows dev box cannot
+        # regenerate Cargo.lock (protobuf-src build script fails on Windows).
+        # Cargo.lock is still committed and respected when present; only new
+        # deps added via Cargo.toml will trigger a lockfile update in CI.
+        run: cargo build --release --bin ${{ env.BINARY_NAME }}
+
+      - name: Prepare Linux binary artifact
+        run: |
+          mkdir -p dist
+          cp "target/release/${{ env.BINARY_NAME }}" "dist/${{ env.BINARY_NAME }}"
+          chmod +x "dist/${{ env.BINARY_NAME }}"
+
+      - name: Upload Linux binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: dist/${{ env.BINARY_NAME }}
+          if-no-files-found: error
+          retention-days: 7

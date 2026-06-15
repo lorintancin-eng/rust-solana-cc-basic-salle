@@ -450,26 +450,7 @@ impl SellExecutor {
             current_ata_balance
         };
 
-        // SellSignal.sell_ratio < 1.0 时按比例卖（trailing/TP/migration 部分卖路径）
-        // 至少卖 1 个 raw token 单位，避免 ratio 太小被四舍五入到 0
-        let token_amount = if signal.sell_ratio < 1.0 && full_token_amount > 1 {
-            let raw = (full_token_amount as f64 * signal.sell_ratio.clamp(0.0, 1.0)) as u64;
-            raw.max(1).min(full_token_amount)
-        } else {
-            full_token_amount
-        };
-
-        if token_amount > 0 && token_amount < full_token_amount {
-            info!(
-                "Partial sell [{}] {} | reason={} | ratio={:.2} | tokens={}/{}",
-                signal.group_name,
-                &position_before_sell.token_mint.to_string()[..12],
-                signal.reason,
-                signal.sell_ratio,
-                token_amount,
-                full_token_amount,
-            );
-        }
+        let token_amount = full_token_amount;
 
         if token_amount == 0 {
             let zero_balance_skips = self
@@ -716,13 +697,8 @@ impl SellExecutor {
         }
 
         if success {
-            if expected_after_balance == 0 {
-                self.auto_sell
-                    .mark_closed(&signal.position_key, last_sig.clone());
-            } else {
-                self.auto_sell
-                    .apply_partial_sell(&signal.position_key, token_amount);
-            }
+            self.auto_sell
+                .mark_closed(&signal.position_key, last_sig.clone());
             self.cleanup_mint_if_unused(&position_before_sell.token_mint);
             self.tg.send(TgEvent::SellSuccess {
                 group_id: signal.position_key.group_id.clone(),
@@ -752,8 +728,7 @@ impl SellExecutor {
             // 跳到上限 5 永久停售。但 tip rent 轮选 / blockhash 过期是 transient ——
             // 实测 [单9yxm] 8pFB 第一次 Pumpfun 链上失败就被永久停售。改成只有自然攻
             // 击 sell_attempts >= 5 时才 suspend，否则 restore 让下次 signal 触发重试。
-            let suspend_auto_sell =
-                signal.reason != SellReason::Manual && auto_attempt_cap_reached;
+            let suspend_auto_sell = signal.reason != SellReason::Manual && auto_attempt_cap_reached;
 
             if suspend_auto_sell {
                 failure_reason = format!(
@@ -816,7 +791,6 @@ impl SellExecutor {
             reason: SellReason::Manual,
             current_price: position.current_price,
             pnl_percent: position.pnl_percent(),
-            sell_ratio: 1.0,
         };
 
         if percent >= 100 {
