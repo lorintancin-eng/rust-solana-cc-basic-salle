@@ -37,6 +37,7 @@
 
 ## Validation
 - `cargo fmt` passed.
+- `cargo fmt --check` passed.
 - `cargo metadata --format-version 1 --no-deps` passed and reports:
   - package version `1.8.1`
   - binary target `copy-trader`
@@ -51,6 +52,9 @@
 - Artifact name remains `copy-trader-linux`.
 - Artifact internal executable remains `copy-trader`.
 - No automatic VPS deployment was added.
+- Code commit pushed: `82fcf763031eac3f394c30836d5e5089019f6be6`.
+- GitHub Actions run `27555774826` completed successfully on Ubuntu.
+- Artifact `copy-trader-linux` was created and contains file `copy-trader`.
 
 ## Artifact / VPS Naming
 - Cargo binary: `copy-trader`
@@ -89,14 +93,12 @@ nohup ./copy-trader-basice-salle > copy-trader-v1.8.log 2>&1 &
 ```
 
 ## Remaining Work
-1. Commit local changes.
-2. Push to GitHub `main`.
-3. Watch GitHub Actions Ubuntu build for the final production validation.
-4. If CI passes, manually download and run the `copy-trader-linux` artifact on the VPS.
+1. Manually download and run the `copy-trader-linux` artifact on the VPS.
+2. Make sure this project uses `/home/ubuntu/rust_project_basice-salle` and binary name `copy-trader-basice-salle`.
+3. Do not run it with the same wallet/config as any other copy-trader instance.
 
 ## Exact Next Step For Next Thread
 - Read `AGENTS.md`.
 - Read this `SESSION_SUMMARY.md`.
-- Check whether local git metadata is available; this workspace currently reported `not a git repository`.
-- If git metadata is restored or initialized safely, commit and push to `main`.
-- Then watch GitHub Actions for `copy-trader-linux`.
+- Check the latest GitHub Actions run on `main`.
+- If the latest run is green, proceed with manual VPS deployment using the commands above.
