@@ -5,7 +5,8 @@ use solana_sdk::signer::Signer;
 use std::time::Duration;
 use tracing::{debug, info};
 
-/// Jupiter API 卖出（自动路由，兼容 PumpFun/PumpSwap/Raydium）
+/// Jupiter API client for sell quotes/swaps and external-route buys.
+#[derive(Clone)]
 pub struct JupiterSeller {
     http_client: reqwest::Client,
 }
@@ -25,6 +26,176 @@ impl JupiterSeller {
         }
     }
 
+    pub async fn quote_sell_out_amount(
+        &self,
+        mint: &Pubkey,
+        token_amount: u64,
+        slippage_bps: u64,
+    ) -> Result<u64> {
+        let mint_str = mint.to_string();
+        let quote_resp = self
+            .fetch_quote(&mint_str, SOL_MINT, token_amount, slippage_bps)
+            .await?;
+        Self::quote_out_amount(&quote_resp)
+    }
+
+    pub async fn build_buy_transaction(
+        &self,
+        output_mint: &Pubkey,
+        sol_lamports: u64,
+        slippage_bps: u64,
+        keypair: &Keypair,
+    ) -> Result<(Vec<u8>, u64)> {
+        let start = std::time::Instant::now();
+        let output_mint_str = output_mint.to_string();
+        let t_quote = std::time::Instant::now();
+        let quote_resp = self
+            .fetch_quote(SOL_MINT, &output_mint_str, sol_lamports, slippage_bps)
+            .await?;
+        let out_amount = Self::quote_out_amount(&quote_resp)?;
+        if out_amount == 0 {
+            anyhow::bail!(
+                "Jupiter buy returned zero output | sol_lamports={} | output_mint={}",
+                sol_lamports,
+                output_mint_str
+            );
+        }
+
+        info!(
+            "Jupiter buy quote: {:.6} SOL -> {} raw tokens | {}ms",
+            sol_lamports as f64 / 1e9,
+            out_amount,
+            t_quote.elapsed().as_millis(),
+        );
+
+        let t_swap = std::time::Instant::now();
+        let signed_bytes = self.build_swap_from_quote(quote_resp, keypair).await?;
+
+        info!(
+            "Jupiter buy transaction built: {}ms (quote: {}ms + swap: {}ms)",
+            start.elapsed().as_millis(),
+            t_quote.elapsed().as_millis(),
+            t_swap.elapsed().as_millis(),
+        );
+
+        Ok((signed_bytes, out_amount))
+    }
+
+    async fn fetch_quote(
+        &self,
+        input_mint: &str,
+        output_mint: &str,
+        amount: u64,
+        slippage_bps: u64,
+    ) -> Result<serde_json::Value> {
+        let quote_response = self
+            .http_client
+            .get(JUPITER_QUOTE_URL)
+            .query(&[
+                ("inputMint", input_mint),
+                ("outputMint", output_mint),
+                ("amount", &amount.to_string()),
+                ("slippageBps", &slippage_bps.to_string()),
+            ])
+            .send()
+            .await
+            .context(format!(
+                "Jupiter quote connect failed: {}",
+                JUPITER_QUOTE_URL
+            ))?;
+
+        let quote_status = quote_response.status();
+        let quote_resp: serde_json::Value = quote_response
+            .json()
+            .await
+            .context("Jupiter quote response parse failed")?;
+
+        if !quote_status.is_success() {
+            anyhow::bail!("Jupiter quote HTTP {}: {}", quote_status, quote_resp);
+        }
+        if let Some(error) = quote_resp.get("error") {
+            anyhow::bail!("Jupiter quote error: {}", error);
+        }
+        if let Some(error) = quote_resp.get("errorCode") {
+            anyhow::bail!(
+                "Jupiter quote error: {} - {}",
+                error,
+                quote_resp.get("error").unwrap_or(&serde_json::Value::Null)
+            );
+        }
+
+        Ok(quote_resp)
+    }
+
+    fn quote_out_amount(quote_resp: &serde_json::Value) -> Result<u64> {
+        quote_resp["outAmount"]
+            .as_str()
+            .and_then(|s| s.parse::<u64>().ok())
+            .ok_or_else(|| anyhow::anyhow!("Jupiter quote missing outAmount"))
+    }
+
+    async fn build_swap_from_quote(
+        &self,
+        quote_resp: serde_json::Value,
+        keypair: &Keypair,
+    ) -> Result<Vec<u8>> {
+        let user_pubkey = keypair.pubkey().to_string();
+        let swap_request = serde_json::json!({
+            "quoteResponse": quote_resp,
+            "userPublicKey": user_pubkey,
+            "dynamicComputeUnitLimit": true,
+            "prioritizationFeeLamports": "auto",
+        });
+
+        let swap_response = self
+            .http_client
+            .post(JUPITER_SWAP_URL)
+            .json(&swap_request)
+            .send()
+            .await
+            .context("Jupiter swap request failed")?;
+
+        let swap_status = swap_response.status();
+        let swap_resp: serde_json::Value = swap_response
+            .json()
+            .await
+            .context("Jupiter swap response parse failed")?;
+
+        if !swap_status.is_success() {
+            anyhow::bail!("Jupiter swap HTTP {}: {}", swap_status, swap_resp);
+        }
+        if let Some(error) = swap_resp.get("error") {
+            anyhow::bail!("Jupiter swap error: {}", error);
+        }
+
+        let swap_tx_base64 = swap_resp["swapTransaction"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Jupiter swap missing swapTransaction"))?;
+
+        Self::sign_swap_transaction(swap_tx_base64, keypair)
+    }
+
+    fn sign_swap_transaction(swap_tx_base64: &str, keypair: &Keypair) -> Result<Vec<u8>> {
+        let tx_bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, swap_tx_base64)
+                .context("Jupiter swap base64 decode failed")?;
+
+        let mut versioned_tx: solana_sdk::transaction::VersionedTransaction =
+            bincode::deserialize(&tx_bytes)
+                .context("Jupiter swap transaction deserialize failed")?;
+
+        let user_pubkey = keypair.pubkey();
+        let account_keys = versioned_tx.message.static_account_keys();
+        if let Some(idx) = account_keys.iter().position(|k| k == &user_pubkey) {
+            let signature = keypair.sign_message(&versioned_tx.message.serialize());
+            if idx < versioned_tx.signatures.len() {
+                versioned_tx.signatures[idx] = signature;
+            }
+        }
+
+        bincode::serialize(&versioned_tx).context("Jupiter signed transaction serialize failed")
+    }
+
     /// 通过 Jupiter API 卖出代币
     /// 返回签名后的 VersionedTransaction 字节（可直接发送）
     pub async fn build_sell_transaction(
@@ -40,7 +211,8 @@ impl JupiterSeller {
 
         // [Step 1] 获取报价
         let t_quote = std::time::Instant::now();
-        let quote_response = self.http_client
+        let quote_response = self
+            .http_client
             .get(JUPITER_QUOTE_URL)
             .query(&[
                 ("inputMint", mint_str.as_str()),
@@ -66,8 +238,11 @@ impl JupiterSeller {
             anyhow::bail!("Jupiter quote 错误: {}", error);
         }
         if let Some(error) = quote_resp.get("errorCode") {
-            anyhow::bail!("Jupiter quote 错误: {} - {}", error,
-                quote_resp.get("error").unwrap_or(&serde_json::Value::Null));
+            anyhow::bail!(
+                "Jupiter quote 错误: {} - {}",
+                error,
+                quote_resp.get("error").unwrap_or(&serde_json::Value::Null)
+            );
         }
 
         let out_amount = quote_resp["outAmount"]
@@ -99,7 +274,8 @@ impl JupiterSeller {
             "prioritizationFeeLamports": "auto",
         });
 
-        let swap_response = self.http_client
+        let swap_response = self
+            .http_client
             .post(JUPITER_SWAP_URL)
             .json(&swap_request)
             .send()
@@ -126,30 +302,25 @@ impl JupiterSeller {
         debug!("Jupiter swap 交易获取: {}ms", t_swap.elapsed().as_millis());
 
         // [Step 3] 反序列化、签名、重新序列化
-        let tx_bytes = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            swap_tx_base64,
-        ).context("Jupiter swap base64 解码失败")?;
+        let tx_bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, swap_tx_base64)
+                .context("Jupiter swap base64 解码失败")?;
 
         let mut versioned_tx: solana_sdk::transaction::VersionedTransaction =
-            bincode::deserialize(&tx_bytes)
-                .context("Jupiter swap 交易反序列化失败")?;
+            bincode::deserialize(&tx_bytes).context("Jupiter swap 交易反序列化失败")?;
 
         // 签名：找到我们 pubkey 对应的签名位置，替换
         let user_pubkey = keypair.pubkey();
         let account_keys = versioned_tx.message.static_account_keys();
         if let Some(idx) = account_keys.iter().position(|k| k == &user_pubkey) {
             let blockhash = *versioned_tx.message.recent_blockhash();
-            let signature = keypair.sign_message(
-                &versioned_tx.message.serialize(),
-            );
+            let signature = keypair.sign_message(&versioned_tx.message.serialize());
             if idx < versioned_tx.signatures.len() {
                 versioned_tx.signatures[idx] = signature;
             }
         }
 
-        let signed_bytes = bincode::serialize(&versioned_tx)
-            .context("签名后交易序列化失败")?;
+        let signed_bytes = bincode::serialize(&versioned_tx).context("签名后交易序列化失败")?;
 
         info!(
             "Jupiter 卖出交易构建完成: {}ms (quote: {}ms + swap: {}ms) | {:.6} SOL",

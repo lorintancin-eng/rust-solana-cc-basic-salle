@@ -4,7 +4,7 @@ use solana_sdk::pubkey::Pubkey;
 use std::path::Path;
 use tracing::{debug, error, info, warn};
 
-use super::position::{Position, PositionKey, PositionState};
+use super::position::{Position, PositionKey, PositionRoute, PositionState};
 
 const POSITIONS_FILE: &str = "positions.json";
 
@@ -31,6 +31,10 @@ struct SavedPosition {
     /// 入场市值 (SOL)
     #[serde(default)]
     entry_mcap_sol: f64,
+    #[serde(default)]
+    route: String,
+    #[serde(default)]
+    token_program: String,
 }
 
 /// 保存所有活跃仓位到 positions.json
@@ -62,6 +66,15 @@ pub fn save_positions(positions: &DashMap<PositionKey, Position>) {
             zero_balance_sell_skips: p.zero_balance_sell_skips,
             token_name: p.token_name.clone(),
             entry_mcap_sol: p.entry_mcap_sol,
+            route: match p.route {
+                PositionRoute::Pumpfun => "pumpfun",
+                PositionRoute::ExternalJupiter => "external_jupiter",
+            }
+            .to_string(),
+            token_program: p
+                .token_program
+                .map(|program| program.to_string())
+                .unwrap_or_default(),
         })
         .collect();
 

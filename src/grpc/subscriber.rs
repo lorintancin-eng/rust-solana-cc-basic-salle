@@ -46,6 +46,12 @@ const CPMM_SWAP_BASE_OUTPUT: [u8; 8] = [55, 217, 98, 86, 163, 74, 180, 173];
 const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
 const TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParseScope {
+    Internal,
+    External,
+}
+
 /// gRPC 订阅器，监听目标钱包的交易
 pub struct GrpcSubscriber {
     grpc_url: String,
@@ -484,6 +490,7 @@ impl GrpcSubscriber {
                 &signature,
                 source_wallet,
                 recv_time,
+                ParseScope::Internal,
             )? {
                 // 延迟序列化：仅在匹配成功后才序列化目标交易（省 ~400µs/非匹配交易）
                 trade.raw_transaction_bytes =
@@ -539,10 +546,71 @@ impl GrpcSubscriber {
                         &signature,
                         source_wallet,
                         recv_time,
+                        ParseScope::Internal,
                     )? {
                         trade.raw_transaction_bytes =
                             Self::serialize_transaction_from_proto(tx_data).unwrap_or_default();
                         // inner instructions 来自 meta，所以交易已执行，不可 Backrun
+                        trade.is_pre_execution = false;
+                        trade.execution_failed = Self::meta_failed(meta);
+                        self.enrich_trade_from_meta(&mut trade, message, meta, &account_keys);
+                        return Ok(Some(trade));
+                    }
+                }
+            }
+        }
+
+        // External DEX route. This intentionally runs only after every
+        // Pump.fun direct/CPI/inner path above failed, so internal routing
+        // keeps priority when a transaction contains both internal and
+        // external programs.
+        for ix in &message.instructions {
+            let program_idx = ix.program_id_index as usize;
+            if program_idx >= account_keys.len() {
+                continue;
+            }
+            let program_id = account_keys[program_idx];
+
+            if let Some(mut trade) = self.try_parse_instruction(
+                &program_id,
+                &ix.data,
+                &ix.accounts,
+                &account_keys,
+                &signature,
+                source_wallet,
+                recv_time,
+                ParseScope::External,
+            )? {
+                trade.raw_transaction_bytes =
+                    Self::serialize_transaction_from_proto(tx_data).unwrap_or_default();
+                trade.is_pre_execution = meta.is_none();
+                trade.execution_failed = Self::meta_failed(meta);
+                self.enrich_trade_from_meta(&mut trade, message, meta, &account_keys);
+                return Ok(Some(trade));
+            }
+        }
+
+        if let Some(m) = meta {
+            for inner_group in &m.inner_instructions {
+                for inner_ix in &inner_group.instructions {
+                    let program_idx = inner_ix.program_id_index as usize;
+                    if program_idx >= account_keys.len() {
+                        continue;
+                    }
+                    let program_id = account_keys[program_idx];
+
+                    if let Some(mut trade) = self.try_parse_instruction(
+                        &program_id,
+                        &inner_ix.data,
+                        &inner_ix.accounts,
+                        &account_keys,
+                        &signature,
+                        source_wallet,
+                        recv_time,
+                        ParseScope::External,
+                    )? {
+                        trade.raw_transaction_bytes =
+                            Self::serialize_transaction_from_proto(tx_data).unwrap_or_default();
                         trade.is_pre_execution = false;
                         trade.execution_failed = Self::meta_failed(meta);
                         self.enrich_trade_from_meta(&mut trade, message, meta, &account_keys);
@@ -559,6 +627,34 @@ impl GrpcSubscriber {
     // 单条指令解析
     // ================================================================
 
+    fn trade_type_for_program(program_id: &Pubkey, scope: ParseScope) -> Option<TradeType> {
+        let program_str = program_id.to_string();
+        match scope {
+            ParseScope::Internal => match program_str.as_str() {
+                PUMPFUN_PROGRAM => Some(TradeType::Pumpfun),
+                _ => None,
+            },
+            ParseScope::External => match program_str.as_str() {
+                PUMPSWAP_PROGRAM => Some(TradeType::PumpSwap),
+                RAYDIUM_AMM_V4 => Some(TradeType::RaydiumAmm),
+                RAYDIUM_CPMM => Some(TradeType::RaydiumCpmm),
+                _ => None,
+            },
+        }
+    }
+
+    #[cfg(test)]
+    fn select_preferred_trade_type(program_ids: &[Pubkey]) -> Option<TradeType> {
+        program_ids
+            .iter()
+            .find_map(|program_id| Self::trade_type_for_program(program_id, ParseScope::Internal))
+            .or_else(|| {
+                program_ids.iter().find_map(|program_id| {
+                    Self::trade_type_for_program(program_id, ParseScope::External)
+                })
+            })
+    }
+
     /// 尝试解析单条指令，判断是否为已知 DEX 的 swap 操作
     /// 同时适用于顶层指令和 inner instructions
     fn try_parse_instruction(
@@ -570,18 +666,11 @@ impl GrpcSubscriber {
         signature: &str,
         source_wallet: Pubkey,
         recv_time: Instant,
+        scope: ParseScope,
     ) -> Result<Option<DetectedTrade>> {
-        let program_str = program_id.to_string();
-
-        // 只匹配 Pump.fun 内盘，其他 DEX 全部跳过
-        let trade_type = match program_str.as_str() {
-            PUMPFUN_PROGRAM => Some(TradeType::Pumpfun),
-            _ => None,
-        };
-
-        let trade_type = match trade_type {
+        let trade_type = match Self::trade_type_for_program(program_id, scope) {
             Some(t) => t,
-            None => return Ok(None), // 非 Pump.fun，跳过
+            None => return Ok(None),
         };
 
         // 解析 buy/sell 方向
@@ -788,7 +877,28 @@ impl GrpcSubscriber {
     ) -> Option<Pubkey> {
         match trade_type {
             TradeType::Pumpfun => instruction_account_slots.get(2).copied().flatten(),
-            _ => None,
+            TradeType::PumpSwap => {
+                let base_mint = instruction_account_slots.get(6).copied().flatten()?;
+                let quote_mint = instruction_account_slots.get(7).copied().flatten()?;
+                Self::non_wsol_mint(base_mint, quote_mint)
+            }
+            TradeType::RaydiumAmm => None,
+            TradeType::RaydiumCpmm => {
+                let input_mint = instruction_account_slots.get(10).copied().flatten()?;
+                let output_mint = instruction_account_slots.get(11).copied().flatten()?;
+                Self::non_wsol_mint(input_mint, output_mint)
+            }
+        }
+    }
+
+    fn non_wsol_mint(left: Pubkey, right: Pubkey) -> Option<Pubkey> {
+        let wsol = Pubkey::from_str(WSOL_MINT).ok()?;
+        if left == wsol {
+            Some(right)
+        } else if right == wsol {
+            Some(left)
+        } else {
+            Some(right)
         }
     }
 
@@ -800,18 +910,14 @@ impl GrpcSubscriber {
     ) -> Option<Pubkey> {
         match trade_type {
             TradeType::Pumpfun => {
-                if let Some(token_program) =
-                    instruction_account_slots.get(8).copied().flatten()
-                {
+                if let Some(token_program) = instruction_account_slots.get(8).copied().flatten() {
                     return Some(token_program);
                 }
 
                 let mint = token_mint.copied()?;
                 let bonding_curve = instruction_account_slots.get(3).copied().flatten()?;
-                let token_program = Pubkey::from_str(
-                    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
-                )
-                .ok()?;
+                let token_program =
+                    Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").ok()?;
                 let token_2022 = Pubkey::from_str(TOKEN_2022_PROGRAM).ok()?;
 
                 Some(Self::detect_pumpfun_token_program(
@@ -822,7 +928,13 @@ impl GrpcSubscriber {
                     &token_2022,
                 ))
             }
-            _ => None,
+            TradeType::PumpSwap => instruction_account_slots.get(8).copied().flatten(),
+            TradeType::RaydiumAmm => instruction_account_slots.get(0).copied().flatten(),
+            TradeType::RaydiumCpmm => {
+                let input_program = instruction_account_slots.get(8).copied().flatten();
+                let output_program = instruction_account_slots.get(9).copied().flatten();
+                output_program.or(input_program)
+            }
         }
     }
 
@@ -1050,22 +1162,89 @@ impl GrpcSubscriber {
         meta: Option<&yellowstone_grpc_proto::prelude::TransactionStatusMeta>,
         all_account_keys: &[Pubkey],
     ) {
-        if !trade.is_buy || trade.sol_amount_lamports > 0 {
-            return;
-        }
-
         let Some(meta) = meta else {
             return;
         };
 
-        if let Some(lamports) = Self::derive_buy_lamports_from_meta(
-            meta,
-            message,
-            all_account_keys,
-            trade.source_wallet,
-        ) {
-            trade.sol_amount_lamports = lamports;
+        if trade.token_mint.is_none() {
+            trade.token_mint =
+                Self::derive_token_mint_from_meta(meta, trade.source_wallet, trade.is_buy);
         }
+
+        if trade.token_program.is_none() {
+            if let Some(mint) = trade.token_mint {
+                trade.token_program = Self::derive_token_program_from_meta(meta, &mint);
+            }
+        }
+
+        if trade.is_buy && trade.sol_amount_lamports == 0 {
+            if let Some(lamports) = Self::derive_buy_lamports_from_meta(
+                meta,
+                message,
+                all_account_keys,
+                trade.source_wallet,
+            ) {
+                trade.sol_amount_lamports = lamports;
+            }
+        }
+    }
+
+    fn derive_token_mint_from_meta(
+        meta: &yellowstone_grpc_proto::prelude::TransactionStatusMeta,
+        source_wallet: Pubkey,
+        is_buy: bool,
+    ) -> Option<Pubkey> {
+        let owner = source_wallet.to_string();
+        let wsol = WSOL_MINT;
+        let mut candidates: HashMap<String, (u64, u64)> = HashMap::new();
+
+        for balance in &meta.pre_token_balances {
+            if balance.owner != owner || balance.mint == wsol {
+                continue;
+            }
+            let amount = balance
+                .ui_token_amount
+                .as_ref()
+                .and_then(|amount| amount.amount.parse::<u64>().ok())
+                .unwrap_or(0);
+            candidates.entry(balance.mint.clone()).or_default().0 = amount;
+        }
+
+        for balance in &meta.post_token_balances {
+            if balance.owner != owner || balance.mint == wsol {
+                continue;
+            }
+            let amount = balance
+                .ui_token_amount
+                .as_ref()
+                .and_then(|amount| amount.amount.parse::<u64>().ok())
+                .unwrap_or(0);
+            candidates.entry(balance.mint.clone()).or_default().1 = amount;
+        }
+
+        candidates
+            .iter()
+            .find_map(|(mint, (pre, post))| {
+                let changed = if is_buy { post > pre } else { pre > post };
+                changed.then(|| mint.parse::<Pubkey>().ok()).flatten()
+            })
+            .or_else(|| {
+                candidates
+                    .keys()
+                    .find_map(|mint| mint.parse::<Pubkey>().ok())
+            })
+    }
+
+    fn derive_token_program_from_meta(
+        meta: &yellowstone_grpc_proto::prelude::TransactionStatusMeta,
+        mint: &Pubkey,
+    ) -> Option<Pubkey> {
+        let mint = mint.to_string();
+        meta.post_token_balances
+            .iter()
+            .chain(meta.pre_token_balances.iter())
+            .find(|balance| balance.mint == mint && !balance.program_id.is_empty())
+            .and_then(|balance| balance.program_id.parse::<Pubkey>().ok())
     }
 
     fn derive_buy_lamports_from_meta(
@@ -1224,5 +1403,36 @@ mod tests {
         assert!(sub.detect_buy_or_sell(&data, &TradeType::PumpSwap, &[], &[]));
         assert!(sub.detect_buy_or_sell(&data, &TradeType::RaydiumAmm, &[], &[]));
         assert!(sub.detect_buy_or_sell(&data, &TradeType::RaydiumCpmm, &[], &[]));
+    }
+
+    #[test]
+    fn internal_program_has_priority_over_external_programs() {
+        let pumpfun = Pubkey::from_str(PUMPFUN_PROGRAM).unwrap();
+        let pumpswap = Pubkey::from_str(PUMPSWAP_PROGRAM).unwrap();
+
+        assert_eq!(
+            GrpcSubscriber::select_preferred_trade_type(&[pumpswap, pumpfun]),
+            Some(TradeType::Pumpfun)
+        );
+    }
+
+    #[test]
+    fn external_program_selected_only_when_no_internal_program_exists() {
+        let pumpswap = Pubkey::from_str(PUMPSWAP_PROGRAM).unwrap();
+        let raydium_amm = Pubkey::from_str(RAYDIUM_AMM_V4).unwrap();
+        let raydium_cpmm = Pubkey::from_str(RAYDIUM_CPMM).unwrap();
+
+        assert_eq!(
+            GrpcSubscriber::select_preferred_trade_type(&[pumpswap]),
+            Some(TradeType::PumpSwap)
+        );
+        assert_eq!(
+            GrpcSubscriber::select_preferred_trade_type(&[raydium_amm]),
+            Some(TradeType::RaydiumAmm)
+        );
+        assert_eq!(
+            GrpcSubscriber::select_preferred_trade_type(&[raydium_cpmm]),
+            Some(TradeType::RaydiumCpmm)
+        );
     }
 }

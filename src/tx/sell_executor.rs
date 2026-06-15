@@ -432,18 +432,26 @@ impl SellExecutor {
         // Jupiter fallback，导致 tip rent 等 transient 失败时仓位无救。现在 Jupiter
         // fallback 永远跑（见 Pumpfun 失败分支）。
 
-        let snapshot = match self.resolve_sell_snapshot(&position_before_sell).await {
-            Ok(snapshot) => snapshot,
-            Err(err) => {
-                warn!("Sell snapshot missing [{}]: {}", signal.group_name, err);
-                return;
+        let snapshot = if position_before_sell.is_external_jupiter() {
+            None
+        } else {
+            match self.resolve_sell_snapshot(&position_before_sell).await {
+                Ok(snapshot) => Some(snapshot),
+                Err(err) => {
+                    warn!("Sell snapshot missing [{}]: {}", signal.group_name, err);
+                    return;
+                }
             }
         };
 
+        let user_ata = snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.user_ata)
+            .unwrap_or_else(|| position_before_sell.user_ata(&self.config.pubkey));
         let current_ata_balance = self
             .ata_cache
             .get(&position_before_sell.token_mint)
-            .unwrap_or_else(|| self.get_token_balance_rpc(&snapshot.user_ata));
+            .unwrap_or_else(|| self.get_token_balance_rpc(&user_ata));
         let full_token_amount = if position_before_sell.token_amount > 0 {
             position_before_sell.token_amount.min(current_ata_balance)
         } else {
@@ -482,13 +490,18 @@ impl SellExecutor {
         let mut last_sig = String::new();
         let mut saw_signature_error = false;
         let mut failure_reason = "sell retries exhausted".to_string();
-        let route_via_jupiter = self
-            .should_route_sell_to_jupiter(
-                &signal.group_name,
-                &position_before_sell.token_mint,
-                &snapshot,
-            )
-            .await;
+        let route_via_jupiter = position_before_sell.is_external_jupiter()
+            || match snapshot.as_ref() {
+                Some(snapshot) => {
+                    self.should_route_sell_to_jupiter(
+                        &signal.group_name,
+                        &position_before_sell.token_mint,
+                        snapshot,
+                    )
+                    .await
+                }
+                None => true,
+            };
 
         for attempt in 1..=MAX_SELL_RETRIES {
             let confirm_timeout_ms = Self::confirm_timeout_ms(signal.reason, attempt);

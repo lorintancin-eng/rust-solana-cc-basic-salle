@@ -11,7 +11,9 @@ use crate::autosell::{AutoSellManager, Position, SellReason, SellSignal};
 use crate::config::{AppConfig, SELL_MODE_FOLLOW, SELL_MODE_TP_SL};
 use crate::consensus::ConsensusEngine;
 use crate::group_stats::{build_closed_trade_record, GroupPerformanceStore};
-use crate::groups::{CopyGroup, GroupManager, ENTRY_MODE_SMART_BUY, ENTRY_MODE_SMART_SELL};
+use crate::groups::{
+    CopyGroup, ExternalMode, GroupManager, ENTRY_MODE_SMART_BUY, ENTRY_MODE_SMART_SELL,
+};
 use crate::tx::sell_executor::SellExecutor;
 use crate::utils::sol_price::SolUsdPrice;
 
@@ -790,7 +792,7 @@ impl TgBot {
 <code>/sellall [group_id]</code> 手动全卖\n\
 <code>/stats</code> 查看运行统计\n\
 <code>/gstats</code> 查看组合绩效\n\n\
-支持快捷设置的参数键：<code>buy</code>、<code>min_buy</code>、<code>tp</code>、<code>sl</code>、<code>trailing</code>、<code>slippage</code>、<code>sell_slippage</code>、<code>consensus</code>、<code>hold</code>、<code>tip_buy</code>、<code>tip_sell</code>、<code>zero_slot_tip</code>、<code>buy_mode</code>、<code>mode</code>、<code>enabled</code>",
+支持快捷设置的参数键：<code>buy</code>、<code>min_buy</code>、<code>tp</code>、<code>sl</code>、<code>trailing</code>、<code>slippage</code>、<code>sell_slippage</code>、<code>consensus</code>、<code>hold</code>、<code>tip_buy</code>、<code>tip_sell</code>、<code>zero_slot_tip</code>、<code>buy_mode</code>、<code>mode</code>、<code>enabled</code>、<code>external</code>、<code>external_buy</code>、<code>external_pumpswap</code>、<code>external_raydium_amm</code>、<code>external_raydium_cpmm</code>",
             group_menu_keyboard_v2(self.groups.zero_slot_buy_enabled()),
         )
         .await;
@@ -1407,6 +1409,35 @@ fn apply_group_setting_value(
             format!("状态 = {}", if enabled { "启用" } else { "停用" })
         }),
 
+        "external" | "external_mode" => value.parse::<ExternalMode>().map(|mode| {
+            group.external_mode = mode;
+            format!("External mode = {}", mode.label())
+        }),
+        "external_buy" | "external_buy_sol" => value
+            .parse::<f64>()
+            .map(|v| {
+                group.external_buy_sol_amount = v.max(0.0);
+                format!("External buy = {} SOL", group.external_buy_sol_amount)
+            })
+            .map_err(|err| err.to_string()),
+        "external_pumpswap" => parse_bool_flag(value).map(|enabled| {
+            group.external_pumpswap_enabled = enabled;
+            format!("External PumpSwap = {}", if enabled { "on" } else { "off" })
+        }),
+        "external_raydium_amm" => parse_bool_flag(value).map(|enabled| {
+            group.external_raydium_amm_enabled = enabled;
+            format!(
+                "External Raydium AMM = {}",
+                if enabled { "on" } else { "off" }
+            )
+        }),
+        "external_raydium_cpmm" => parse_bool_flag(value).map(|enabled| {
+            group.external_raydium_cpmm_enabled = enabled;
+            format!(
+                "External Raydium CPMM = {}",
+                if enabled { "on" } else { "off" }
+            )
+        }),
         _ => Err(format!("未知参数键: {}", key)),
     }
 }
@@ -1434,6 +1465,14 @@ fn parse_bool_flag(value: &str) -> Result<bool, String> {
         "1" | "on" | "true" | "yes" => Ok(true),
         "0" | "off" | "false" | "no" => Ok(false),
         _ => Err("布尔值无效，请使用 on/off。".to_string()),
+    }
+}
+
+fn on_off(enabled: bool) -> &'static str {
+    if enabled {
+        "on"
+    } else {
+        "off"
     }
 }
 
@@ -1479,6 +1518,11 @@ fn setting_label(key: &str) -> &'static str {
         "tip_buy" => "买入小费",
         "tip_sell" => "卖出小费",
         "mode" => "卖出模式",
+        "external" | "external_mode" => "外盘模式",
+        "external_buy" | "external_buy_sol" => "外盘买入金额",
+        "external_pumpswap" => "外盘 PumpSwap",
+        "external_raydium_amm" => "外盘 Raydium AMM",
+        "external_raydium_cpmm" => "外盘 Raydium CPMM",
         _ => "参数",
     }
 }
@@ -1500,6 +1544,11 @@ fn setting_custom_hint(group: &CopyGroup, key: &str) -> String {
         "buy_mode" => "buy",
         "mode" => "follow",
         "enabled" => "on",
+        "external" => "dry_run",
+        "external_buy" => "0.002",
+        "external_pumpswap" => "on",
+        "external_raydium_amm" => "on",
+        "external_raydium_cpmm" => "on",
         _ => "value",
     };
 
@@ -1633,6 +1682,17 @@ fn group_setting_menu_keyboard(group: &CopyGroup) -> serde_json::Value {
                 {"text": "卖出小费", "callback_data": format!("gm:key:{}:tip_sell", group.id)}
             ],
             [
+                {"text": "外盘模式", "callback_data": format!("gm:key:{}:external", group.id)},
+                {"text": "外盘买入", "callback_data": format!("gm:key:{}:external_buy", group.id)}
+            ],
+            [
+                {"text": "PumpSwap", "callback_data": format!("gm:key:{}:external_pumpswap", group.id)},
+                {"text": "Raydium AMM", "callback_data": format!("gm:key:{}:external_raydium_amm", group.id)}
+            ],
+            [
+                {"text": "Raydium CPMM", "callback_data": format!("gm:key:{}:external_raydium_cpmm", group.id)}
+            ],
+            [
                 {"text": "查看组合", "callback_data": format!("gm:view:{}", group.id)},
                 {"text": "返回菜单", "callback_data": "gm:main"}
             ]
@@ -1700,6 +1760,19 @@ fn group_setting_value_keyboard(group_id: &str, key: &str) -> serde_json::Value 
             key,
             &[("跟卖模式", "follow"), ("止盈止损", "tp_sl")],
         )],
+        "external" | "external_mode" => vec![value_row(
+            group_id,
+            key,
+            &[("off", "off"), ("dry-run", "dry_run"), ("live", "live")],
+        )],
+        "external_buy" | "external_buy_sol" => vec![value_row(
+            group_id,
+            key,
+            &[("0.002 SOL", "0.002"), ("0.005 SOL", "0.005")],
+        )],
+        "external_pumpswap" | "external_raydium_amm" | "external_raydium_cpmm" => {
+            vec![value_row(group_id, key, &[("on", "on"), ("off", "off")])]
+        }
         _ => vec![value_row(group_id, key, &[("默认", "0")])],
     };
 
@@ -1822,6 +1895,13 @@ fn group_value_text(group: &CopyGroup, key: &str) -> String {
         "zero_slot_tip" => format!("{} lamports", group.zero_slot_tip_lamports),
         "buy_mode" => entry_mode_label(group.entry_mode).to_string(),
         "mode" => sell_mode_label(group.sell_mode).to_string(),
+        "external" | "external_mode" => group.external_mode.label().to_string(),
+        "external_buy" | "external_buy_sol" => {
+            format!("{} SOL", group.external_buy_sol_amount)
+        }
+        "external_pumpswap" => on_off(group.external_pumpswap_enabled).to_string(),
+        "external_raydium_amm" => on_off(group.external_raydium_amm_enabled).to_string(),
+        "external_raydium_cpmm" => on_off(group.external_raydium_cpmm_enabled).to_string(),
         _ => "-".to_string(),
     }
 }
@@ -1940,6 +2020,17 @@ fn group_setting_menu_keyboard_v2(group: &CopyGroup) -> serde_json::Value {
                 {"text": "卖出模式", "callback_data": format!("gm:key:{}:mode", group.id)}
             ],
             [
+                {"text": "外盘模式", "callback_data": format!("gm:key:{}:external", group.id)},
+                {"text": "外盘买入", "callback_data": format!("gm:key:{}:external_buy", group.id)}
+            ],
+            [
+                {"text": "PumpSwap", "callback_data": format!("gm:key:{}:external_pumpswap", group.id)},
+                {"text": "Raydium AMM", "callback_data": format!("gm:key:{}:external_raydium_amm", group.id)}
+            ],
+            [
+                {"text": "Raydium CPMM", "callback_data": format!("gm:key:{}:external_raydium_cpmm", group.id)}
+            ],
+            [
                 {"text": "查看组合", "callback_data": format!("gm:view:{}", group.id)},
                 {"text": "返回菜单", "callback_data": "gm:main"}
             ]
@@ -2016,6 +2107,17 @@ fn format_group_compact_v2(group: &CopyGroup) -> String {
     )
 }
 
+fn format_external_group_status(group: &CopyGroup) -> String {
+    format!(
+        "\nExternal mode: {}\nExternal buy: {} SOL\nExternal venues: PumpSwap={} | Raydium AMM={} | Raydium CPMM={}",
+        group.external_mode.label(),
+        group.external_buy_sol_amount,
+        on_off(group.external_pumpswap_enabled),
+        on_off(group.external_raydium_amm_enabled),
+        on_off(group.external_raydium_cpmm_enabled),
+    )
+}
+
 fn format_group_detail_v2(group: &CopyGroup, selected: bool) -> String {
     let mut text = format!(
         "<b>{}</b> ({}){}\n状态：{}\n跟单买入模式：{}\n卖出模式：{}\n钱包数：{}\n买入金额：{} SOL\n最小触发买入：{} SOL\nTP：{}%\nSL：{}%\n移动止损：{}%\n买入滑点：{} bps\n卖出滑点：{} bps\n共识数量：{}\n持仓时间：{} 分钟\n买入小费：{} lamports\n卖出小费：{} lamports\n0slot 小费：{} lamports",
@@ -2039,6 +2141,8 @@ fn format_group_detail_v2(group: &CopyGroup, selected: bool) -> String {
         group.tip_sell_lamports,
         group.zero_slot_tip_lamports,
     );
+
+    text.push_str(&format_external_group_status(group));
 
     if group.wallets.is_empty() {
         text.push_str("\n监听钱包：暂无");
@@ -2068,6 +2172,11 @@ fn setting_label_v2(key: &str) -> &'static str {
         "zero_slot_tip" => "0slot 小费",
         "buy_mode" => "跟单买入模式",
         "mode" => "卖出模式",
+        "external" | "external_mode" => "外盘模式",
+        "external_buy" | "external_buy_sol" => "外盘买入金额",
+        "external_pumpswap" => "外盘 PumpSwap",
+        "external_raydium_amm" => "外盘 Raydium AMM",
+        "external_raydium_cpmm" => "外盘 Raydium CPMM",
         _ => "参数",
     }
 }
@@ -2224,5 +2333,56 @@ pub async fn send_shutdown_notification(bot_token: &str, chat_id: &str) {
         .build()
     {
         let _ = client.post(&url).json(&body).send().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_group() -> CopyGroup {
+        CopyGroup {
+            id: "g1".to_string(),
+            name: "group-1".to_string(),
+            enabled: true,
+            wallets: vec![Pubkey::new_unique()],
+            consensus_min_wallets: 1,
+            consensus_timeout_secs: 5,
+            buy_sol_amount: 0.01,
+            min_target_buy_sol: 0.0,
+            take_profit_percent: 15.0,
+            stop_loss_percent: 10.0,
+            trailing_stop_percent: 5.0,
+            slippage_bps: 500,
+            sell_slippage_bps: 1500,
+            max_hold_seconds: 120,
+            tip_buy_lamports: 10_000,
+            tip_sell_lamports: 10_000,
+            zero_slot_tip_lamports: 1_000_000,
+            entry_mode: ENTRY_MODE_SMART_BUY,
+            sell_mode: SELL_MODE_TP_SL,
+            external_mode: ExternalMode::Off,
+            external_buy_sol_amount: 0.002,
+            external_pumpswap_enabled: true,
+            external_raydium_amm_enabled: true,
+            external_raydium_cpmm_enabled: true,
+        }
+    }
+
+    #[test]
+    fn group_setting_external_values_update_group() {
+        let mut group = test_group();
+
+        apply_group_setting_value(&mut group, "external", "dry_run").unwrap();
+        apply_group_setting_value(&mut group, "external_buy", "0.005").unwrap();
+        apply_group_setting_value(&mut group, "external_pumpswap", "off").unwrap();
+        apply_group_setting_value(&mut group, "external_raydium_amm", "on").unwrap();
+        apply_group_setting_value(&mut group, "external_raydium_cpmm", "off").unwrap();
+
+        assert_eq!(group.external_mode, ExternalMode::DryRun);
+        assert_eq!(group.external_buy_sol_amount, 0.005);
+        assert!(!group.external_pumpswap_enabled);
+        assert!(group.external_raydium_amm_enabled);
+        assert!(!group.external_raydium_cpmm_enabled);
     }
 }

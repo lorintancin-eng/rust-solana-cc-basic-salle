@@ -13,7 +13,9 @@ use anyhow::Result;
 use dashmap::DashMap;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
-use spl_associated_token_account::get_associated_token_address;
+use spl_associated_token_account::{
+    get_associated_token_address, get_associated_token_address_with_program_id,
+};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -21,7 +23,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Notify, Semaphore};
 use tracing::{debug, error, info, warn};
 
-use autosell::{AutoSellManager, Position, SellAccountSnapshot, SellReason, SellSignal};
+use autosell::{
+    AutoSellManager, Position, PositionRoute, SellAccountSnapshot, SellReason, SellSignal,
+};
 use config::AppConfig;
 use consensus::engine::{BuySignal, ConsensusTrigger};
 use consensus::ConsensusEngine;
@@ -29,12 +33,13 @@ use groups::{CopyGroup, GroupManager, ENTRY_MODE_SMART_BUY};
 use grpc::{AccountSubscriber, AccountUpdate, AtaBalanceCache, BondingCurveCache, GrpcSubscriber};
 use processor::prefetch::PrefetchCache;
 use processor::pumpfun::PumpfunProcessor;
-use processor::{DetectedTrade, TradeOrigin};
+use processor::{DetectedTrade, TradeOrigin, TradeType};
 use telegram::{TgBot, TgEvent, TgNotifier, TgStats};
 use tx::{
     blockhash,
     builder::TxBuilder,
     confirm::{format_mcap_usd, format_price_gmgn, BuyConfirmer},
+    jupiter::JupiterSeller,
     sell_executor::SellExecutor,
     sender::TxSender,
 };
@@ -305,6 +310,87 @@ fn spawn_buy_execution(
             &prefetch_cache,
             &bc_cache,
             &bc_fetches,
+            &ata_cache,
+            &account_subscriber,
+            &tg,
+            &tg_stats,
+        )
+        .await;
+
+        finish_group_mint(&mint_dedup, &dedup_key, submitted);
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_external_buy_execution(
+    group: CopyGroup,
+    mint: Pubkey,
+    token_program: Pubkey,
+    source_wallet: Pubkey,
+    detected_at: Instant,
+    config: AppConfig,
+    rpc_client: Arc<RpcClient>,
+    tx_sender: Arc<TxSender>,
+    sol_usd: SolUsdPrice,
+    auto_sell_manager: Arc<AutoSellManager>,
+    bc_cache: BondingCurveCache,
+    ata_cache: AtaBalanceCache,
+    account_subscriber: Arc<AccountSubscriber>,
+    tg: TgNotifier,
+    tg_stats: Arc<TgStats>,
+    buy_exec_limiter: Arc<Semaphore>,
+    mint_dedup: GroupMintDedup,
+) {
+    let dedup_key = group_mint_key(&group.id, &mint);
+    tokio::spawn(async move {
+        let permit = match tokio::time::timeout(
+            Duration::from_millis(BUY_EXECUTOR_QUEUE_TIMEOUT_MS),
+            buy_exec_limiter.acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) => {
+                warn!(
+                    "External buy executor closed [{}] {}",
+                    group.name,
+                    &mint.to_string()[..12],
+                );
+                return;
+            }
+            Err(_) => {
+                warn!(
+                    "External buy queue timeout [{}] {} | waited={}ms",
+                    group.name,
+                    &mint.to_string()[..12],
+                    BUY_EXECUTOR_QUEUE_TIMEOUT_MS,
+                );
+                return;
+            }
+        };
+        let _permit = permit;
+
+        if !try_start_group_mint(&mint_dedup, &dedup_key) {
+            debug!(
+                "External buy dedup active [{}] {}",
+                group.name,
+                &mint.to_string()[..12],
+            );
+            return;
+        }
+
+        let submitted = execute_external_buy(
+            &group,
+            &mint,
+            &token_program,
+            &source_wallet,
+            detected_at,
+            &config,
+            &rpc_client,
+            &tx_sender,
+            &sol_usd,
+            &auto_sell_manager,
+            &bc_cache,
             &ata_cache,
             &account_subscriber,
             &tg,
@@ -740,6 +826,100 @@ async fn main() -> Result<()> {
             continue;
         }
 
+        if is_external_trade_type(trade.trade_type) {
+            for group in matching_groups {
+                if !group.accepts_external_trade_type(trade.trade_type) {
+                    continue;
+                }
+
+                log_external_route(&group, &trade, &token_mint);
+
+                if group.external_mode.is_dry_run() {
+                    continue;
+                }
+
+                if !group.external_mode.is_live() {
+                    continue;
+                }
+
+                if !trade.execution_failed && !trade.is_buy && group.follow_sell_mode() {
+                    if let Some(position) =
+                        auto_sell_manager.get_position_by_group_mint(&group.id, &token_mint)
+                    {
+                        if position.can_sell()
+                            && !position.max_sell_attempts_reached(MAX_AUTO_SELL_SIGNAL_ATTEMPTS)
+                        {
+                            let _ = sell_signal_tx.send(SellSignal {
+                                position_key: position.key(),
+                                group_name: group.name.clone(),
+                                reason: SellReason::FollowSell,
+                                current_price: position.current_price,
+                                pnl_percent: position.pnl_percent(),
+                            });
+                        }
+                    }
+                }
+
+                let wants_entry = if trade.is_buy {
+                    group.buy_on_smart_buy()
+                } else {
+                    group.buy_on_smart_sell()
+                };
+
+                if !wants_entry {
+                    continue;
+                }
+
+                if trade.execution_failed {
+                    debug!(
+                        "Skip external live candidate due to landed failure: [{}] {} | sig: {}",
+                        group.name,
+                        &token_mint.to_string()[..12],
+                        trade.signature,
+                    );
+                    continue;
+                }
+
+                if group.min_target_buy_lamports() > 0
+                    && trade.sol_amount_lamports > 0
+                    && trade.sol_amount_lamports < group.min_target_buy_lamports()
+                {
+                    continue;
+                }
+
+                if group.consensus_min_wallets > 1 {
+                    warn!(
+                        "External live consensus skipped [{}] {}: consensus_min_wallets={} is not supported on external route yet",
+                        group.name,
+                        &token_mint.to_string()[..12],
+                        group.consensus_min_wallets,
+                    );
+                    continue;
+                }
+
+                spawn_external_buy_execution(
+                    group.clone(),
+                    token_mint,
+                    token_program,
+                    trade.source_wallet,
+                    trade.detected_at,
+                    config.clone(),
+                    rpc_client.clone(),
+                    tx_sender.clone(),
+                    sol_usd.clone(),
+                    auto_sell_manager.clone(),
+                    bc_cache.clone(),
+                    ata_cache.clone(),
+                    account_subscriber.clone(),
+                    tg_notifier.clone(),
+                    tg_stats.clone(),
+                    buy_exec_limiter.clone(),
+                    mint_dedup.clone(),
+                );
+            }
+            continue;
+        }
+
         let wants_entry_any = matching_groups.iter().any(|group| {
             if trade.is_buy {
                 group.buy_on_smart_buy()
@@ -939,6 +1119,186 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_external_buy(
+    group: &CopyGroup,
+    mint: &Pubkey,
+    token_program: &Pubkey,
+    source_wallet: &Pubkey,
+    detected_at: Instant,
+    config: &AppConfig,
+    rpc_client: &Arc<RpcClient>,
+    tx_sender: &Arc<TxSender>,
+    sol_usd: &SolUsdPrice,
+    auto_sell_manager: &Arc<AutoSellManager>,
+    bc_cache: &BondingCurveCache,
+    ata_cache: &AtaBalanceCache,
+    account_subscriber: &Arc<AccountSubscriber>,
+    tg: &TgNotifier,
+    tg_stats: &Arc<TgStats>,
+) -> bool {
+    let start = Instant::now();
+    let buy_lamports = group.external_buy_lamports();
+    if buy_lamports == 0 {
+        warn!(
+            "External buy skipped [{}] {}: external_buy is zero",
+            group.name,
+            &mint.to_string()[..12],
+        );
+        return false;
+    }
+
+    let buy_sol = buy_lamports as f64 / 1e9;
+    let user_ata =
+        get_associated_token_address_with_program_id(&config.pubkey, mint, token_program);
+    account_subscriber.track_ata(*mint, user_ata);
+    let pre_buy_ata_balance = ata_cache.get(mint).unwrap_or_else(|| {
+        rpc_client
+            .get_token_account_balance(&user_ata)
+            .map(|value| value.amount.parse::<u64>().unwrap_or(0))
+            .unwrap_or(0)
+    });
+
+    let jupiter = JupiterSeller::new();
+    let quote_build_start = Instant::now();
+    let buy_result = jupiter
+        .build_buy_transaction(mint, buy_lamports, group.slippage_bps, &config.keypair)
+        .await;
+    let quote_build = quote_build_start.elapsed();
+
+    let (signed_tx_bytes, estimated_tokens_raw) = match buy_result {
+        Ok(result) => result,
+        Err(err) => {
+            warn!(
+                "External Jupiter buy skipped [{}] {}: {}",
+                group.name,
+                &mint.to_string()[..12],
+                err
+            );
+            tg_stats.buy_failed.fetch_add(1, Ordering::Relaxed);
+            tg.send(TgEvent::BuyFailed {
+                group_id: group.id.clone(),
+                group_name: group.name.clone(),
+                mint: *mint,
+                reason: format!("external Jupiter buy build failed: {}", err),
+            });
+            return false;
+        }
+    };
+
+    let tx_build_start = Instant::now();
+    let transaction: solana_sdk::transaction::VersionedTransaction =
+        match bincode::deserialize(&signed_tx_bytes) {
+            Ok(tx) => tx,
+            Err(err) => {
+                error!(
+                    "External Jupiter buy tx deserialize failed [{}] {}: {}",
+                    group.name,
+                    &mint.to_string()[..12],
+                    err
+                );
+                return false;
+            }
+        };
+    let tx_build = tx_build_start.elapsed();
+
+    let display_tokens = estimated_tokens_raw as f64 / 1e6;
+    let entry_price_sol = if display_tokens > 0.0 {
+        buy_sol / display_tokens
+    } else {
+        0.0
+    };
+
+    let mut position = Position::new(
+        group.clone(),
+        *mint,
+        buy_lamports,
+        entry_price_sol,
+        *source_wallet,
+        pre_buy_ata_balance,
+    );
+    position.set_route(PositionRoute::ExternalJupiter);
+    position.set_token_program(*token_program);
+    position.set_token_amount_estimate(estimated_tokens_raw);
+    let position_key = position.key();
+
+    let send_call_start = Instant::now();
+    let send_result = tx_sender.fire_and_forget_without_0slot(&transaction);
+
+    match send_result {
+        Ok(sig) => {
+            let send_call = send_call_start.elapsed();
+            let total_latency = start.elapsed();
+            let sig_str = sig.to_string();
+            let buy_usd = sol_usd.sol_to_usd(buy_sol);
+
+            info!(
+                "External Jupiter buy submitted: [{}] {} | {:.4} SOL (${:.2}) | est {:.0} tokens | detect_to_exec={} | quote_build={} | tx_decode={} | send_call={} | total={} | sig={}",
+                group.name,
+                &mint.to_string()[..12],
+                buy_sol,
+                buy_usd,
+                estimated_tokens_raw as f64 / 1e6,
+                format_latency(detected_at.elapsed()),
+                format_latency(quote_build),
+                format_latency(tx_build),
+                format_latency(send_call),
+                format_latency(total_latency),
+                &sig_str[..16.min(sig_str.len())],
+            );
+
+            tg_stats.buy_attempts.fetch_add(1, Ordering::Relaxed);
+            tg.send(TgEvent::BuySubmitted {
+                group_name: group.name.clone(),
+                mint: *mint,
+                sol_amount: buy_sol,
+                latency_ms: total_latency.as_millis() as u64,
+            });
+
+            if config.auto_sell_enabled {
+                position.mark_submitted(sig_str);
+                position.mark_confirming();
+                auto_sell_manager.add_position(position);
+
+                BuyConfirmer::spawn_confirm_task(
+                    rpc_client.clone(),
+                    auto_sell_manager.clone(),
+                    bc_cache.clone(),
+                    ata_cache.clone(),
+                    sol_usd.clone(),
+                    position_key,
+                    group.name.clone(),
+                    *mint,
+                    sig,
+                    config.pubkey,
+                    buy_lamports,
+                    user_ata,
+                    estimated_tokens_raw,
+                    pre_buy_ata_balance,
+                    tg.clone(),
+                );
+            }
+            true
+        }
+        Err(err) => {
+            error!(
+                "External Jupiter buy send failed [{}] {}: {}",
+                group.name,
+                &mint.to_string()[..12],
+                err
+            );
+            tg_stats.buy_failed.fetch_add(1, Ordering::Relaxed);
+            tg.send(TgEvent::BuyFailed {
+                group_id: group.id.clone(),
+                group_name: group.name.clone(),
+                mint: *mint,
+                reason: err.to_string(),
+            });
+            false
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1439,12 +1799,43 @@ fn group_mint_key(group_id: &str, mint: &Pubkey) -> String {
     format!("{}:{}", group_id, mint)
 }
 
+fn is_external_trade_type(trade_type: TradeType) -> bool {
+    !matches!(trade_type, TradeType::Pumpfun)
+}
+
+fn log_external_route(group: &CopyGroup, trade: &DetectedTrade, token_mint: &Pubkey) {
+    let tag = if trade.execution_failed {
+        "EXTERNAL_FAILED"
+    } else if group.external_mode.is_dry_run() {
+        "EXTERNAL_DRY_RUN"
+    } else {
+        "EXTERNAL_LIVE"
+    };
+    info!(
+        "{} group={} venue={} side={} mint={} wallet={} sol={:.6} origin={} sig={} failed={}",
+        tag,
+        group.name,
+        trade.trade_type,
+        if trade.is_buy { "BUY" } else { "SELL" },
+        token_mint,
+        trade.source_wallet,
+        trade.sol_amount_lamports as f64 / 1e9,
+        trade.trade_origin,
+        trade.signature,
+        trade.execution_failed,
+    );
+}
+
 fn extract_token_info(trade: &DetectedTrade) -> Option<(Pubkey, Pubkey)> {
     if let Some(mint) = trade.token_mint {
         let token_program = trade
             .token_program
             .or_else(|| Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").ok())?;
         return Some((mint, token_program));
+    }
+
+    if is_external_trade_type(trade.trade_type) {
+        return None;
     }
 
     if trade.instruction_accounts.len() >= 9 {

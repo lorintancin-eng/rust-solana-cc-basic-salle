@@ -121,7 +121,14 @@ impl TradeProcessor for RaydiumCpmmProcessor {
 
         // 构建 swap 指令
         let (amount_in, min_out, input_ata, output_ata, input_mint, output_mint) = if trade.is_buy {
-            (sol_amount, 0u64, user_wsol_ata, user_token_ata, wsol_mint, token_mint)
+            (
+                sol_amount,
+                0u64,
+                user_wsol_ata,
+                user_token_ata,
+                wsol_mint,
+                token_mint,
+            )
         } else {
             let balance = self
                 .rpc_client
@@ -131,7 +138,14 @@ impl TradeProcessor for RaydiumCpmmProcessor {
             if balance == 0 {
                 anyhow::bail!("No tokens to sell on Raydium CPMM");
             }
-            (balance, 0u64, user_token_ata, user_wsol_ata, token_mint, wsol_mint)
+            (
+                balance,
+                0u64,
+                user_token_ata,
+                user_wsol_ata,
+                token_mint,
+                wsol_mint,
+            )
         };
 
         // 指令数据: discriminator(8) + amount_in(8) + minimum_amount_out(8)
@@ -141,12 +155,12 @@ impl TradeProcessor for RaydiumCpmmProcessor {
         data.extend_from_slice(&min_out.to_le_bytes());
 
         let swap_accounts = vec![
-            AccountMeta::new(*user, true),           // payer
+            AccountMeta::new(*user, true),                    // payer
             AccountMeta::new_readonly(cpmm.authority, false), // authority PDA
             AccountMeta::new_readonly(cpmm.amm_config, false),
             AccountMeta::new(cpmm.pool_state, false),
-            AccountMeta::new(input_ata, false),       // user input
-            AccountMeta::new(output_ata, false),      // user output
+            AccountMeta::new(input_ata, false),  // user input
+            AccountMeta::new(output_ata, false), // user output
             AccountMeta::new(cpmm.input_vault, false),
             AccountMeta::new(cpmm.output_vault, false),
             AccountMeta::new_readonly(token_program, false), // input token program

@@ -12,6 +12,7 @@ use super::persistence;
 use super::position::{Position, PositionKey, PositionState, SellReason, SellSignal};
 use crate::config::AppConfig;
 use crate::grpc::{AccountUpdate, BondingCurveCache};
+use crate::tx::jupiter::JupiterSeller;
 use crate::utils::sol_price::SolUsdPrice;
 
 const MAX_AUTO_SELL_SIGNAL_ATTEMPTS: u32 = 5;
@@ -22,6 +23,7 @@ pub struct AutoSellManager {
     bc_cache: BondingCurveCache,
     rpc_client: Arc<RpcClient>,
     sol_usd: SolUsdPrice,
+    jupiter: JupiterSeller,
 }
 
 impl AutoSellManager {
@@ -37,6 +39,7 @@ impl AutoSellManager {
             bc_cache,
             rpc_client,
             sol_usd,
+            jupiter: JupiterSeller::new(),
         }
     }
 
@@ -346,6 +349,7 @@ impl AutoSellManager {
         let config = self.config.clone();
         let bc_cache = self.bc_cache.clone();
         let rpc = self.rpc_client.clone();
+        let jupiter = self.jupiter.clone();
         let user_pubkey = config.pubkey;
         let interval = Duration::from_secs(config.price_check_interval_secs);
 
@@ -440,6 +444,33 @@ impl AutoSellManager {
                         continue;
                     }
 
+                    let external_jupiter_quote = if snapshot.is_external_jupiter()
+                        && snapshot.token_amount > 0
+                        && bc_cache.get(&snapshot.token_mint).is_none()
+                    {
+                        match jupiter
+                            .quote_sell_out_amount(
+                                &snapshot.token_mint,
+                                snapshot.token_amount,
+                                snapshot.group.sell_slippage_bps,
+                            )
+                            .await
+                        {
+                            Ok(out_lamports) => Some(out_lamports),
+                            Err(err) => {
+                                debug!(
+                                    "External Jupiter quote skipped [{}] {}: {}",
+                                    snapshot.group.name,
+                                    &snapshot.token_mint.to_string()[..12],
+                                    err
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
                     let signal = {
                         let mut pos = match positions.get_mut(&key) {
                             Some(entry) => entry,
@@ -463,6 +494,15 @@ impl AutoSellManager {
                             let price = bc_state.price_sol();
                             if price > 0.0 {
                                 pos.update_price(price);
+                            }
+                            Self::check_exit_conditions(&pos)
+                        } else if let Some(out_lamports) = external_jupiter_quote {
+                            if pos.token_amount > 0 {
+                                let display_tokens = pos.token_amount as f64 / 1e6;
+                                let price = (out_lamports as f64 / 1e9) / display_tokens;
+                                if price > 0.0 {
+                                    pos.update_price(price);
+                                }
                             }
                             Self::check_exit_conditions(&pos)
                         } else {

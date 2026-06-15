@@ -1,4 +1,7 @@
 use solana_sdk::pubkey::Pubkey;
+use spl_associated_token_account::{
+    get_associated_token_address, get_associated_token_address_with_program_id,
+};
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
@@ -55,6 +58,12 @@ pub struct SellAccountSnapshot {
     pub source_wallet: Pubkey,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PositionRoute {
+    Pumpfun,
+    ExternalJupiter,
+}
+
 #[derive(Debug, Clone)]
 pub struct Position {
     pub group: CopyGroup,
@@ -83,6 +92,8 @@ pub struct Position {
     pub buy_signature: String,
     pub sell_signature: Option<String>,
     pub sell_snapshot: Option<SellAccountSnapshot>,
+    pub route: PositionRoute,
+    pub token_program: Option<Pubkey>,
     pub pre_buy_ata_balance: u64,
 
     // 重试计数
@@ -127,6 +138,8 @@ impl Position {
             buy_signature: String::new(),
             sell_signature: None,
             sell_snapshot: None,
+            route: PositionRoute::Pumpfun,
+            token_program: None,
             pre_buy_ata_balance,
             sell_attempts: 0,
             zero_balance_sell_skips: 0,
@@ -144,6 +157,29 @@ impl Position {
 
     pub fn set_sell_snapshot(&mut self, snapshot: SellAccountSnapshot) {
         self.sell_snapshot = Some(snapshot);
+    }
+
+    pub fn set_route(&mut self, route: PositionRoute) {
+        self.route = route;
+    }
+
+    pub fn is_external_jupiter(&self) -> bool {
+        self.route == PositionRoute::ExternalJupiter
+    }
+
+    pub fn set_token_program(&mut self, token_program: Pubkey) {
+        self.token_program = Some(token_program);
+    }
+
+    pub fn user_ata(&self, owner: &Pubkey) -> Pubkey {
+        match self.token_program {
+            Some(token_program) => get_associated_token_address_with_program_id(
+                owner,
+                &self.token_mint,
+                &token_program,
+            ),
+            None => get_associated_token_address(owner, &self.token_mint),
+        }
     }
 
     pub fn set_token_amount_estimate(&mut self, token_amount: u64) {

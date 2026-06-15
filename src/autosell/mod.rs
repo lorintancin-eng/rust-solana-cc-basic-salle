@@ -4,5 +4,6 @@ pub mod position;
 
 pub use manager::AutoSellManager;
 pub use position::{
-    Position, PositionKey, PositionState, SellAccountSnapshot, SellReason, SellSignal,
+    Position, PositionKey, PositionRoute, PositionState, SellAccountSnapshot, SellReason,
+    SellSignal,
 };

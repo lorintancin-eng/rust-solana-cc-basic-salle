@@ -1,9 +1,10 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, warn, debug};
+use tracing::{debug, info, warn};
 
-const COINGECKO_URL: &str = "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd";
+const COINGECKO_URL: &str =
+    "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd";
 const USER_AGENT: &str = concat!("copy-trader/", env!("CARGO_PKG_VERSION"));
 
 /// SOL/USD 实时汇率（CoinGecko 免费 API + 本地缓存）
@@ -31,7 +32,10 @@ impl SolUsdPrice {
             None => {
                 let cents = (default_price * 100.0) as u64;
                 self.price_cents.store(cents, Ordering::Relaxed);
-                warn!("SOL/USD CoinGecko 获取失败，使用默认: ${:.2}", default_price);
+                warn!(
+                    "SOL/USD CoinGecko 获取失败，使用默认: ${:.2}",
+                    default_price
+                );
             }
         }
     }
@@ -87,7 +91,11 @@ impl SolUsdPrice {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            warn!("CoinGecko HTTP {}: {}", status, &body[..body.len().min(200)]);
+            warn!(
+                "CoinGecko HTTP {}: {}",
+                status,
+                &body[..body.len().min(200)]
+            );
             return None;
         }
 

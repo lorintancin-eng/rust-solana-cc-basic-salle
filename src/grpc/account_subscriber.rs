@@ -270,16 +270,10 @@ impl AccountSubscriber {
             .x_token(self.grpc_token.clone())?
             .connect_timeout(Duration::from_secs(ACCOUNT_GRPC_CONNECT_TIMEOUT_SECS))
             .timeout(Duration::from_secs(ACCOUNT_GRPC_STREAM_TIMEOUT_SECS))
-            .http2_keep_alive_interval(Duration::from_secs(
-                ACCOUNT_GRPC_HTTP2_KEEPALIVE_SECS,
-            ))
-            .keep_alive_timeout(Duration::from_secs(
-                ACCOUNT_GRPC_KEEPALIVE_TIMEOUT_SECS,
-            ))
+            .http2_keep_alive_interval(Duration::from_secs(ACCOUNT_GRPC_HTTP2_KEEPALIVE_SECS))
+            .keep_alive_timeout(Duration::from_secs(ACCOUNT_GRPC_KEEPALIVE_TIMEOUT_SECS))
             .keep_alive_while_idle(true)
-            .tcp_keepalive(Some(Duration::from_secs(
-                ACCOUNT_GRPC_TCP_KEEPALIVE_SECS,
-            )))
+            .tcp_keepalive(Some(Duration::from_secs(ACCOUNT_GRPC_TCP_KEEPALIVE_SECS)))
             .tcp_nodelay(true)
             .tls_config(ClientTlsConfig::new().with_native_roots())?
             .max_decoding_message_size(64 * 1024 * 1024)

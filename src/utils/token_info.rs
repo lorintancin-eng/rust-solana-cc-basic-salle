@@ -18,10 +18,7 @@ pub struct TokenInfo {
 }
 
 /// 从链上获取代币名称（Metaplex metadata）
-pub async fn fetch_token_info(
-    rpc_client: &Arc<RpcClient>,
-    mint: &Pubkey,
-) -> TokenInfo {
+pub async fn fetch_token_info(rpc_client: &Arc<RpcClient>, mint: &Pubkey) -> TokenInfo {
     // 尝试获取 Metaplex metadata
     let (name, symbol) = fetch_metadata_name(rpc_client, mint).await;
 
@@ -38,8 +35,7 @@ pub async fn fetch_token_info(
 /// 从 Metaplex metadata 获取名称
 async fn fetch_metadata_name(rpc: &Arc<RpcClient>, mint: &Pubkey) -> (String, String) {
     // Metaplex metadata PDA: ["metadata", metaplex_program, mint]
-    let metaplex_program =
-        Pubkey::from_str("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s").unwrap();
+    let metaplex_program = Pubkey::from_str("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s").unwrap();
     let (metadata_pda, _) = Pubkey::find_program_address(
         &[b"metadata", metaplex_program.as_ref(), mint.as_ref()],
         &metaplex_program,
@@ -82,8 +78,7 @@ async fn fetch_market_cap(rpc: &Arc<RpcClient>, mint: &Pubkey) -> f64 {
 
     let rpc_clone = rpc.clone();
     let bc = bonding_curve;
-    let result =
-        tokio::task::spawn_blocking(move || rpc_clone.get_account(&bc)).await;
+    let result = tokio::task::spawn_blocking(move || rpc_clone.get_account(&bc)).await;
 
     match result {
         Ok(Ok(account)) => {
@@ -103,9 +98,7 @@ fn extract_string(data: &[u8], offset: usize, max_len: usize) -> String {
     if offset + 4 > data.len() {
         return String::new();
     }
-    let len = u32::from_le_bytes(
-        data[offset..offset + 4].try_into().unwrap_or([0; 4]),
-    ) as usize;
+    let len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap_or([0; 4])) as usize;
     let actual_len = len.min(max_len).min(data.len() - offset - 4);
     let start = offset + 4;
     let end = start + actual_len;
