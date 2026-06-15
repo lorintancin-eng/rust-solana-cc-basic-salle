@@ -65,7 +65,11 @@
 - Artifact name remains `copy-trader-linux`.
 - Artifact internal executable remains `copy-trader`.
 - No automatic VPS deployment was added.
-- Push/CI status still needs to be completed for this external route change.
+- Code commit was pushed to GitHub `main` via GitHub Git Database API because local `git push` HTTPS timed out.
+- Remote code commit: `05430f7c53443a9f829d9ba57082896d481e9fef`.
+- GitHub Actions run `27560747785` completed successfully on Ubuntu.
+- Artifact `copy-trader-linux` was created.
+- Artifact was downloaded and verified to contain executable file `copy-trader`.
 
 ## Artifact / VPS Naming
 - Cargo binary: `copy-trader`
@@ -108,13 +112,12 @@ Config-only rollback:
 ```
 
 ## Remaining Work
-1. Commit and push this external route change to `main`.
-2. Wait for GitHub Actions Ubuntu build to pass.
-3. Confirm artifact `copy-trader-linux` contains executable `copy-trader`.
-4. Manually download and run it on the VPS.
-5. Start with `external dry_run`, verify PumpSwap/Raydium side and mint logs, then switch selected groups to `external live`.
+1. Manually download and run the latest `copy-trader-linux` artifact on the VPS.
+2. Start with `external dry_run`, verify PumpSwap/Raydium side and mint logs, then switch selected groups to `external live`.
+3. Do not run this project with the same wallet/config as another copy-trader instance.
 
 ## Exact Next Step For Next Thread
 - Read `AGENTS.md`.
 - Read this `SESSION_SUMMARY.md`.
-- Check `git status`, commit/push if not done, then monitor GitHub Actions.
+- Check the latest GitHub Actions run on `main`.
+- If the latest run is green, continue with manual VPS deployment using the commands above.
