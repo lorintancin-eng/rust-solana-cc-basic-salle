@@ -37,6 +37,11 @@
   - `external_mode=dry_run` or `live` enables PumpSwap, Raydium AMM, and Raydium CPMM together.
   - Removed separate PumpSwap/Raydium AMM/Raydium CPMM buttons and shortcut setting keys from the Telegram menu/help.
   - Bumped version from `1.8.3` to `1.8.4`.
+- Follow-up fix after external live buy hit Jupiter on-chain error `InstructionError(6, Custom(6014))`:
+  - Added `instructionVersion=V2` to all Jupiter quote requests.
+  - This applies to external Jupiter buys, Jupiter sells, and external-position Jupiter valuation quotes.
+  - Added a small unit test for the quote parameter builder.
+  - Bumped version from `1.8.4` to `1.8.5`.
 
 ## Files Changed
 - `Cargo.toml`
@@ -63,6 +68,11 @@
   - `src/groups.rs`
   - `src/telegram.rs`
   - `SESSION_SUMMARY.md`
+- Latest Jupiter V2 quote fix changed:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `src/tx/jupiter.rs`
+  - `SESSION_SUMMARY.md`
 - Existing local diffs/formatting were preserved in:
   - `src/grpc/account_subscriber.rs`
   - `src/grpc/mod.rs`
@@ -71,11 +81,15 @@
   - `src/utils/token_info.rs`
 
 ## Validation
-- `cargo fmt --check` passed for version `1.8.4`.
+- `cargo fmt --check` passed for version `1.8.5`.
 - `cargo metadata --format-version 1 --no-deps` passed and reports:
-  - package version `1.8.4`
+  - package version `1.8.5`
   - binary target `copy-trader`
 - `git diff --check` passed with only Windows line-ending warnings.
+- Previous validation for version `1.8.4`:
+  - `cargo fmt --check` passed.
+  - `cargo metadata --format-version 1 --no-deps` passed and reported package version `1.8.4` and binary target `copy-trader`.
+  - `git diff --check` passed with only Windows line-ending warnings.
 - `cargo test external --bin copy-trader` on Windows failed before project source checks in `protobuf-src` because this local environment lacks `sh`.
 - `cargo check --bin copy-trader` on Windows failed before project source checks in `protobuf-src` because this local environment lacks `sh`.
 - `cargo test pump_amm --bin copy-trader` on Windows hit the same `protobuf-src` / missing `sh` blocker before test compilation.

@@ -15,6 +15,7 @@ pub struct JupiterSeller {
 const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
 const JUPITER_QUOTE_URL: &str = "https://public.jupiterapi.com/quote";
 const JUPITER_SWAP_URL: &str = "https://public.jupiterapi.com/swap";
+const JUPITER_INSTRUCTION_VERSION: &str = "V2";
 
 impl JupiterSeller {
     pub fn new() -> Self {
@@ -91,12 +92,12 @@ impl JupiterSeller {
         let quote_response = self
             .http_client
             .get(JUPITER_QUOTE_URL)
-            .query(&[
-                ("inputMint", input_mint),
-                ("outputMint", output_mint),
-                ("amount", &amount.to_string()),
-                ("slippageBps", &slippage_bps.to_string()),
-            ])
+            .query(&Self::quote_query_params(
+                input_mint,
+                output_mint,
+                amount,
+                slippage_bps,
+            ))
             .send()
             .await
             .context(format!(
@@ -214,12 +215,12 @@ impl JupiterSeller {
         let quote_response = self
             .http_client
             .get(JUPITER_QUOTE_URL)
-            .query(&[
-                ("inputMint", mint_str.as_str()),
-                ("outputMint", SOL_MINT),
-                ("amount", &token_amount.to_string()),
-                ("slippageBps", &slippage_bps.to_string()),
-            ])
+            .query(&Self::quote_query_params(
+                mint_str.as_str(),
+                SOL_MINT,
+                token_amount,
+                slippage_bps,
+            ))
             .send()
             .await
             .context(format!("Jupiter quote 连接失败: {}", JUPITER_QUOTE_URL))?;
@@ -331,5 +332,39 @@ impl JupiterSeller {
         );
 
         Ok(signed_bytes)
+    }
+
+    fn quote_query_params(
+        input_mint: &str,
+        output_mint: &str,
+        amount: u64,
+        slippage_bps: u64,
+    ) -> Vec<(&'static str, String)> {
+        vec![
+            ("inputMint", input_mint.to_string()),
+            ("outputMint", output_mint.to_string()),
+            ("amount", amount.to_string()),
+            ("slippageBps", slippage_bps.to_string()),
+            (
+                "instructionVersion",
+                JUPITER_INSTRUCTION_VERSION.to_string(),
+            ),
+        ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quote_query_params_request_v2_instructions() {
+        let params = JupiterSeller::quote_query_params("input", "output", 123, 456);
+
+        assert!(params.contains(&("instructionVersion", "V2".to_string())));
+        assert!(params.contains(&("inputMint", "input".to_string())));
+        assert!(params.contains(&("outputMint", "output".to_string())));
+        assert!(params.contains(&("amount", "123".to_string())));
+        assert!(params.contains(&("slippageBps", "456".to_string())));
     }
 }
