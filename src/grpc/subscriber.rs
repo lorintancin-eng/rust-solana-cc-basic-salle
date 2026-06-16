@@ -21,6 +21,7 @@ use crate::processor::{DetectedTrade, TradeOrigin, TradeType};
 // ============================================
 const PUMPFUN_PROGRAM: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const PUMPSWAP_PROGRAM: &str = "PSwapMdSai8tjrEXcxFeQth87xC4rRsa4VA5mhGhXkP";
+const PUMP_AMM_PROGRAM: &str = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
 const RAYDIUM_AMM_V4: &str = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
 const RAYDIUM_CPMM: &str = "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C";
 
@@ -635,7 +636,7 @@ impl GrpcSubscriber {
                 _ => None,
             },
             ParseScope::External => match program_str.as_str() {
-                PUMPSWAP_PROGRAM => Some(TradeType::PumpSwap),
+                PUMPSWAP_PROGRAM | PUMP_AMM_PROGRAM => Some(TradeType::PumpSwap),
                 RAYDIUM_AMM_V4 => Some(TradeType::RaydiumAmm),
                 RAYDIUM_CPMM => Some(TradeType::RaydiumCpmm),
                 _ => None,
@@ -878,6 +879,9 @@ impl GrpcSubscriber {
         match trade_type {
             TradeType::Pumpfun => instruction_account_slots.get(2).copied().flatten(),
             TradeType::PumpSwap => {
+                if let Some(mint) = Self::extract_pump_amm_token_mint(instruction_account_slots) {
+                    return Some(mint);
+                }
                 let base_mint = instruction_account_slots.get(6).copied().flatten()?;
                 let quote_mint = instruction_account_slots.get(7).copied().flatten()?;
                 Self::non_wsol_mint(base_mint, quote_mint)
@@ -888,6 +892,19 @@ impl GrpcSubscriber {
                 let output_mint = instruction_account_slots.get(11).copied().flatten()?;
                 Self::non_wsol_mint(input_mint, output_mint)
             }
+        }
+    }
+
+    fn extract_pump_amm_token_mint(instruction_account_slots: &[Option<Pubkey>]) -> Option<Pubkey> {
+        let base_mint = instruction_account_slots.get(3).copied().flatten()?;
+        let quote_mint = instruction_account_slots.get(4).copied().flatten()?;
+        let wsol = Pubkey::from_str(WSOL_MINT).ok()?;
+        if base_mint == wsol {
+            Some(quote_mint)
+        } else if quote_mint == wsol {
+            Some(base_mint)
+        } else {
+            None
         }
     }
 
@@ -928,7 +945,24 @@ impl GrpcSubscriber {
                     &token_2022,
                 ))
             }
-            TradeType::PumpSwap => instruction_account_slots.get(8).copied().flatten(),
+            TradeType::PumpSwap => {
+                if Self::extract_pump_amm_token_mint(instruction_account_slots).is_some() {
+                    let base_mint = instruction_account_slots.get(3).copied().flatten();
+                    let quote_mint = instruction_account_slots.get(4).copied().flatten();
+                    let base_program = instruction_account_slots.get(11).copied().flatten();
+                    let quote_program = instruction_account_slots.get(12).copied().flatten();
+                    let wsol = Pubkey::from_str(WSOL_MINT).ok()?;
+
+                    if base_mint == Some(wsol) {
+                        return quote_program;
+                    }
+                    if quote_mint == Some(wsol) {
+                        return base_program;
+                    }
+                }
+
+                instruction_account_slots.get(8).copied().flatten()
+            }
             TradeType::RaydiumAmm => instruction_account_slots.get(0).copied().flatten(),
             TradeType::RaydiumCpmm => {
                 let input_program = instruction_account_slots.get(8).copied().flatten();
@@ -1021,6 +1055,13 @@ impl GrpcSubscriber {
             //   [16..24] quote_amount_in (u64, SOL lamports)
             // ========================================
             TradeType::PumpSwap => {
+                if disc == PUMPFUN_BUY_DISC || disc == PUMPFUN_BUY_EXACT_SOL_IN_DISC {
+                    return true;
+                }
+                if disc == PUMPFUN_SELL_DISC {
+                    return false;
+                }
+
                 if data.len() >= 24 {
                     let base_in = u64::from_le_bytes(data[8..16].try_into().unwrap_or([0; 8]));
                     let quote_in = u64::from_le_bytes(data[16..24].try_into().unwrap_or([0; 8]));
@@ -1146,7 +1187,14 @@ impl GrpcSubscriber {
                     0
                 }
             }
-            TradeType::PumpSwap => u64::from_le_bytes(data[16..24].try_into().unwrap_or([0; 8])),
+            TradeType::PumpSwap => {
+                let disc = &data[..8];
+                if disc == PUMPFUN_SELL_DISC {
+                    0
+                } else {
+                    u64::from_le_bytes(data[16..24].try_into().unwrap_or([0; 8]))
+                }
+            }
             _ => 0,
         }
     }
@@ -1376,6 +1424,21 @@ mod tests {
     }
 
     #[test]
+    fn test_pump_amm_sell_discriminator_is_pumpswap_sell() {
+        let sub = make_subscriber();
+        let mut data = vec![0u8; 24];
+        data[..8].copy_from_slice(&PUMPFUN_SELL_DISC);
+        data[8..16].copy_from_slice(&500_000u64.to_le_bytes());
+        data[16..24].copy_from_slice(&1_000_000u64.to_le_bytes());
+
+        assert!(!sub.detect_buy_or_sell(&data, &TradeType::PumpSwap, &[], &[]));
+        assert_eq!(
+            GrpcSubscriber::extract_buy_lamports(&TradeType::PumpSwap, &data),
+            0
+        );
+    }
+
+    #[test]
     fn test_raydium_amm_swap_base_in() {
         let sub = make_subscriber();
         let data = [9u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
@@ -1433,6 +1496,54 @@ mod tests {
         assert_eq!(
             GrpcSubscriber::select_preferred_trade_type(&[raydium_cpmm]),
             Some(TradeType::RaydiumCpmm)
+        );
+    }
+
+    #[test]
+    fn pump_amm_program_is_external_pumpswap() {
+        let pump_amm = Pubkey::from_str("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA").unwrap();
+
+        assert_eq!(
+            GrpcSubscriber::select_preferred_trade_type(&[pump_amm]),
+            Some(TradeType::PumpSwap)
+        );
+    }
+
+    #[test]
+    fn pump_amm_layout_extracts_token_mint_and_program() {
+        let token_mint = Pubkey::from_str("E8UXwqhNiiMwVRRV4F81rUBUYXNUd4bA78ZxpQxZpump").unwrap();
+        let wsol = Pubkey::from_str(WSOL_MINT).unwrap();
+        let token_2022 = Pubkey::from_str(TOKEN_2022_PROGRAM).unwrap();
+        let token_program =
+            Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+        let instruction_account_slots = vec![
+            Some(Pubkey::new_unique()),
+            Some(Pubkey::new_unique()),
+            Some(Pubkey::new_unique()),
+            Some(token_mint),
+            Some(wsol),
+            Some(Pubkey::new_unique()),
+            Some(Pubkey::new_unique()),
+            Some(Pubkey::new_unique()),
+            Some(Pubkey::new_unique()),
+            Some(Pubkey::new_unique()),
+            Some(Pubkey::new_unique()),
+            Some(token_2022),
+            Some(token_program),
+        ];
+
+        assert_eq!(
+            GrpcSubscriber::extract_token_mint(&TradeType::PumpSwap, &instruction_account_slots),
+            Some(token_mint)
+        );
+        assert_eq!(
+            GrpcSubscriber::extract_token_program(
+                &TradeType::PumpSwap,
+                &instruction_account_slots,
+                &[],
+                Some(&token_mint),
+            ),
+            Some(token_2022)
         );
     }
 }

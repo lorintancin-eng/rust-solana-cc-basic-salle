@@ -27,6 +27,12 @@
 - External positions are marked as `ExternalJupiter` and use Jupiter token-to-SOL quote for autosell valuation.
 - External sell path skips Pump.fun bonding curve snapshot requirements and routes via Jupiter.
 - Bumped version from `1.8.1` to `1.8.2`.
+- Follow-up fix after a real missed wallet trade:
+  - The wallet `8zkgFGVZrDLieViwqiXFCydSX6WL5hsxmUu55yBdsNsZ` traded through Pump AMM program `pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA`.
+  - Added that Pump AMM program as a PumpSwap external venue alias.
+  - Added Pump AMM account layout support: token mint from instruction slots `3/4`, token program from slots `11/12`.
+  - Added Pump AMM discriminator handling so sell instructions are not misclassified as buys.
+  - Bumped version from `1.8.2` to `1.8.3`.
 
 ## Files Changed
 - `Cargo.toml`
@@ -42,6 +48,11 @@
 - `src/autosell/persistence.rs`
 - `src/autosell/manager.rs`
 - `src/tx/sell_executor.rs`
+- Latest Pump AMM follow-up changed:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `src/grpc/subscriber.rs`
+  - `SESSION_SUMMARY.md`
 - Existing local diffs/formatting were preserved in:
   - `src/grpc/account_subscriber.rs`
   - `src/grpc/mod.rs`
@@ -52,10 +63,11 @@
 ## Validation
 - `cargo fmt --check` passed.
 - `cargo metadata --format-version 1 --no-deps` passed and reports:
-  - package version `1.8.2`
+  - package version `1.8.3`
   - binary target `copy-trader`
 - `git diff --check` passed with only Windows line-ending warnings.
 - `cargo check --bin copy-trader` on Windows failed before project source checks in `protobuf-src` because this local environment lacks `sh`.
+- `cargo test pump_amm --bin copy-trader` on Windows hit the same `protobuf-src` / missing `sh` blocker before test compilation.
 - Production validation must come from GitHub Actions Ubuntu build.
 
 ## CI / GitHub Actions
