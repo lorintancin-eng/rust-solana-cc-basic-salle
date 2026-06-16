@@ -646,6 +646,8 @@ mod tests {
         assert!(group.accepts_external_trade_type(TradeType::PumpSwap));
         assert!(group.accepts_external_trade_type(TradeType::RaydiumAmm));
         assert!(group.accepts_external_trade_type(TradeType::RaydiumCpmm));
+        assert!(group.accepts_external_trade_type(TradeType::RaydiumClmm));
+        assert!(group.accepts_external_trade_type(TradeType::MeteoraDlmm));
         assert!(!group.accepts_external_trade_type(TradeType::Pumpfun));
     }
 
@@ -675,6 +677,8 @@ mod tests {
         assert!(group.accepts_external_trade_type(TradeType::PumpSwap));
         assert!(group.accepts_external_trade_type(TradeType::RaydiumAmm));
         assert!(group.accepts_external_trade_type(TradeType::RaydiumCpmm));
+        assert!(group.accepts_external_trade_type(TradeType::RaydiumClmm));
+        assert!(group.accepts_external_trade_type(TradeType::MeteoraDlmm));
         assert!(!group.accepts_external_trade_type(TradeType::Pumpfun));
     }
 }

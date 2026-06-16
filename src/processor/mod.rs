@@ -18,6 +18,8 @@ pub enum TradeType {
     PumpSwap,
     RaydiumAmm,
     RaydiumCpmm,
+    RaydiumClmm,
+    MeteoraDlmm,
 }
 
 impl fmt::Display for TradeType {
@@ -27,6 +29,8 @@ impl fmt::Display for TradeType {
             TradeType::PumpSwap => write!(f, "PumpSwap"),
             TradeType::RaydiumAmm => write!(f, "Raydium AMM"),
             TradeType::RaydiumCpmm => write!(f, "Raydium CPMM"),
+            TradeType::RaydiumClmm => write!(f, "Raydium CLMM"),
+            TradeType::MeteoraDlmm => write!(f, "Meteora DLMM"),
         }
     }
 }

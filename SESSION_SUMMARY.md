@@ -2,6 +2,7 @@
 
 ## Current Goal
 - Add an independent external DEX route for PumpSwap, Raydium AMM v4, and Raydium CPMM.
+- Extend the same external route to Raydium CLMM and Meteora DLMM.
 - Keep Pump.fun internal routing as the first priority.
 - Support external dry-run logging first, then Jupiter small-position live buy/sell.
 - Keep Cargo binary name `copy-trader`, GitHub artifact `copy-trader-linux`, and VPS runtime name `copy-trader-basice-salle`.
@@ -42,6 +43,13 @@
   - This applies to external Jupiter buys, Jupiter sells, and external-position Jupiter valuation quotes.
   - Added a small unit test for the quote parameter builder.
   - Bumped version from `1.8.4` to `1.8.5`.
+- Follow-up external pool expansion:
+  - Added Raydium CLMM program `CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK`.
+  - Added Meteora DLMM program `LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo`.
+  - CLMM/DLMM detection is restricted to swap-family discriminators so liquidity/reward/position instructions do not trigger external follow buys.
+  - CLMM extracts direction from user input token account slot `3`, mint from slots `11/12`, and infers Token/Token-2022 from the user's ATA when possible.
+  - DLMM extracts direction from `userTokenIn` slot `4`, mint from `tokenXMint/tokenYMint` slots `6/7`, and token program from slots `11/12`.
+  - Bumped version from `1.8.5` to `1.8.6`.
 
 ## Files Changed
 - `Cargo.toml`
@@ -73,6 +81,13 @@
   - `Cargo.lock`
   - `src/tx/jupiter.rs`
   - `SESSION_SUMMARY.md`
+- Latest CLMM/DLMM pool expansion changed:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `src/processor/mod.rs`
+  - `src/grpc/subscriber.rs`
+  - `src/groups.rs`
+  - `SESSION_SUMMARY.md`
 - Existing local diffs/formatting were preserved in:
   - `src/grpc/account_subscriber.rs`
   - `src/grpc/mod.rs`
@@ -86,6 +101,11 @@
   - package version `1.8.5`
   - binary target `copy-trader`
 - `git diff --check` passed with only Windows line-ending warnings.
+- `cargo fmt --check` passed for version `1.8.6`.
+- `cargo metadata --format-version 1 --no-deps` passed and reports:
+  - package version `1.8.6`
+  - binary target `copy-trader`
+- `git diff --check` passed for version `1.8.6` with only Windows line-ending warnings.
 - Previous validation for version `1.8.4`:
   - `cargo fmt --check` passed.
   - `cargo metadata --format-version 1 --no-deps` passed and reported package version `1.8.4` and binary target `copy-trader`.

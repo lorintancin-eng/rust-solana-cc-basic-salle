@@ -24,6 +24,8 @@ const PUMPSWAP_PROGRAM: &str = "PSwapMdSai8tjrEXcxFeQth87xC4rRsa4VA5mhGhXkP";
 const PUMP_AMM_PROGRAM: &str = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
 const RAYDIUM_AMM_V4: &str = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
 const RAYDIUM_CPMM: &str = "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C";
+const RAYDIUM_CLMM: &str = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK";
+const METEORA_DLMM: &str = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo";
 
 // Pump.fun discriminators (Anchor sighash)
 // buy  = sha256("global:buy")[..8]
@@ -42,6 +44,18 @@ const PUMPSWAP_SWAP_DISC: [u8; 8] = [248, 198, 158, 145, 225, 117, 135, 200];
 // swap_base_output = sha256("global:swap_base_output")[..8]
 const CPMM_SWAP_BASE_INPUT: [u8; 8] = [143, 190, 90, 218, 196, 30, 51, 222];
 const CPMM_SWAP_BASE_OUTPUT: [u8; 8] = [55, 217, 98, 86, 163, 74, 180, 173];
+
+// Raydium CLMM Anchor discriminator
+// swap_v2 = sha256("global:swap_v2")[..8]
+const RAYDIUM_CLMM_SWAP_V2: [u8; 8] = [43, 4, 237, 11, 26, 201, 30, 98];
+
+// Meteora DLMM Anchor discriminators
+const METEORA_DLMM_SWAP: [u8; 8] = [248, 198, 158, 145, 225, 117, 135, 200];
+const METEORA_DLMM_SWAP2: [u8; 8] = [65, 75, 63, 76, 235, 91, 91, 136];
+const METEORA_DLMM_SWAP_EXACT_OUT: [u8; 8] = [250, 73, 101, 33, 38, 207, 75, 184];
+const METEORA_DLMM_SWAP_EXACT_OUT2: [u8; 8] = [43, 215, 247, 132, 137, 60, 243, 81];
+const METEORA_DLMM_SWAP_WITH_PRICE_IMPACT: [u8; 8] = [56, 173, 230, 208, 173, 228, 156, 205];
+const METEORA_DLMM_SWAP_WITH_PRICE_IMPACT2: [u8; 8] = [74, 98, 192, 214, 177, 51, 75, 51];
 
 // WSOL Mint
 const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
@@ -639,6 +653,8 @@ impl GrpcSubscriber {
                 PUMPSWAP_PROGRAM | PUMP_AMM_PROGRAM => Some(TradeType::PumpSwap),
                 RAYDIUM_AMM_V4 => Some(TradeType::RaydiumAmm),
                 RAYDIUM_CPMM => Some(TradeType::RaydiumCpmm),
+                RAYDIUM_CLMM => Some(TradeType::RaydiumClmm),
+                METEORA_DLMM => Some(TradeType::MeteoraDlmm),
                 _ => None,
             },
         }
@@ -658,6 +674,28 @@ impl GrpcSubscriber {
 
     /// 尝试解析单条指令，判断是否为已知 DEX 的 swap 操作
     /// 同时适用于顶层指令和 inner instructions
+    fn is_supported_external_swap_instruction(trade_type: &TradeType, data: &[u8]) -> bool {
+        if data.len() < 8 {
+            return !matches!(trade_type, TradeType::RaydiumClmm | TradeType::MeteoraDlmm);
+        }
+
+        let disc = &data[..8];
+        match trade_type {
+            TradeType::RaydiumClmm => disc == RAYDIUM_CLMM_SWAP_V2,
+            TradeType::MeteoraDlmm => Self::is_meteora_dlmm_swap_discriminator(disc),
+            _ => true,
+        }
+    }
+
+    fn is_meteora_dlmm_swap_discriminator(disc: &[u8]) -> bool {
+        disc == METEORA_DLMM_SWAP
+            || disc == METEORA_DLMM_SWAP2
+            || disc == METEORA_DLMM_SWAP_EXACT_OUT
+            || disc == METEORA_DLMM_SWAP_EXACT_OUT2
+            || disc == METEORA_DLMM_SWAP_WITH_PRICE_IMPACT
+            || disc == METEORA_DLMM_SWAP_WITH_PRICE_IMPACT2
+    }
+
     fn try_parse_instruction(
         &self,
         program_id: &Pubkey,
@@ -673,6 +711,9 @@ impl GrpcSubscriber {
             Some(t) => t,
             None => return Ok(None),
         };
+        if !Self::is_supported_external_swap_instruction(&trade_type, data) {
+            return Ok(None);
+        }
 
         // 解析 buy/sell 方向
         let is_buy = self.detect_buy_or_sell(data, &trade_type, account_indices, all_account_keys);
@@ -705,6 +746,7 @@ impl GrpcSubscriber {
             &instruction_account_slots,
             all_account_keys,
             token_mint.as_ref(),
+            Some(&source_wallet),
         );
 
         let mut trade = DetectedTrade {
@@ -892,6 +934,16 @@ impl GrpcSubscriber {
                 let output_mint = instruction_account_slots.get(11).copied().flatten()?;
                 Self::non_wsol_mint(input_mint, output_mint)
             }
+            TradeType::RaydiumClmm => {
+                let input_mint = instruction_account_slots.get(11).copied().flatten()?;
+                let output_mint = instruction_account_slots.get(12).copied().flatten()?;
+                Self::non_wsol_mint(input_mint, output_mint)
+            }
+            TradeType::MeteoraDlmm => {
+                let token_x_mint = instruction_account_slots.get(6).copied().flatten()?;
+                let token_y_mint = instruction_account_slots.get(7).copied().flatten()?;
+                Self::non_wsol_mint(token_x_mint, token_y_mint)
+            }
         }
     }
 
@@ -924,6 +976,7 @@ impl GrpcSubscriber {
         instruction_account_slots: &[Option<Pubkey>],
         all_account_keys: &[Pubkey],
         token_mint: Option<&Pubkey>,
+        source_wallet: Option<&Pubkey>,
     ) -> Option<Pubkey> {
         match trade_type {
             TradeType::Pumpfun => {
@@ -969,7 +1022,67 @@ impl GrpcSubscriber {
                 let output_program = instruction_account_slots.get(9).copied().flatten();
                 output_program.or(input_program)
             }
+            TradeType::RaydiumClmm => {
+                let wallet = source_wallet?;
+                let token_mint = token_mint.copied()?;
+                let wsol = Pubkey::from_str(WSOL_MINT).ok()?;
+                let input_mint = instruction_account_slots.get(11).copied().flatten()?;
+                let output_mint = instruction_account_slots.get(12).copied().flatten()?;
+                let user_token_account = if input_mint == wsol {
+                    instruction_account_slots.get(4).copied().flatten()?
+                } else if output_mint == wsol {
+                    instruction_account_slots.get(3).copied().flatten()?
+                } else {
+                    return None;
+                };
+                Self::infer_token_program_from_user_ata(wallet, &token_mint, &user_token_account)
+            }
+            TradeType::MeteoraDlmm => {
+                let token_x_mint = instruction_account_slots.get(6).copied().flatten();
+                let token_y_mint = instruction_account_slots.get(7).copied().flatten();
+                let token_x_program = instruction_account_slots.get(11).copied().flatten();
+                let token_y_program = instruction_account_slots.get(12).copied().flatten();
+                let mint = token_mint.copied()?;
+
+                if token_x_mint == Some(mint) {
+                    return token_x_program;
+                }
+                if token_y_mint == Some(mint) {
+                    return token_y_program;
+                }
+
+                None
+            }
         }
+    }
+
+    fn infer_token_program_from_user_ata(
+        wallet: &Pubkey,
+        mint: &Pubkey,
+        user_token_account: &Pubkey,
+    ) -> Option<Pubkey> {
+        let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").ok()?;
+        let token_2022 = Pubkey::from_str(TOKEN_2022_PROGRAM).ok()?;
+        let legacy_ata = spl_associated_token_account::get_associated_token_address_with_program_id(
+            wallet,
+            mint,
+            &token_program,
+        );
+        if *user_token_account == legacy_ata {
+            return Some(token_program);
+        }
+
+        let token_2022_ata =
+            spl_associated_token_account::get_associated_token_address_with_program_id(
+                wallet,
+                mint,
+                &token_2022,
+            );
+        if *user_token_account == token_2022_ata {
+            return Some(token_2022);
+        }
+
+        None
     }
 
     fn detect_pumpfun_token_program(
@@ -1128,6 +1241,32 @@ impl GrpcSubscriber {
                     true
                 }
             }
+
+            // Raydium CLMM swap_v2:
+            //   index 3 = user input token account
+            //   index 4 = user output token account
+            //   index 11/12 = input/output mints
+            TradeType::RaydiumClmm => {
+                if disc == RAYDIUM_CLMM_SWAP_V2 {
+                    self.is_sol_input(account_indices, all_account_keys, 3)
+                } else {
+                    debug!("Unknown Raydium CLMM discriminator: {:?}", disc);
+                    true
+                }
+            }
+
+            // Meteora DLMM swap family:
+            //   index 4 = userTokenIn
+            //   index 5 = userTokenOut
+            //   index 6/7 = tokenXMint/tokenYMint
+            TradeType::MeteoraDlmm => {
+                if Self::is_meteora_dlmm_swap_discriminator(disc) {
+                    self.is_sol_input(account_indices, all_account_keys, 4)
+                } else {
+                    debug!("Unknown Meteora DLMM discriminator: {:?}", disc);
+                    true
+                }
+            }
         }
     }
 
@@ -1194,6 +1333,9 @@ impl GrpcSubscriber {
                 } else {
                     u64::from_le_bytes(data[16..24].try_into().unwrap_or([0; 8]))
                 }
+            }
+            TradeType::RaydiumClmm | TradeType::MeteoraDlmm => {
+                u64::from_le_bytes(data[8..16].try_into().unwrap_or([0; 8]))
             }
             _ => 0,
         }
@@ -1383,6 +1525,20 @@ mod tests {
         GrpcSubscriber::new("https://test.grpc.shyft.to".to_string(), None, vec![])
     }
 
+    fn make_subscriber_with_wallet(wallet: Pubkey) -> GrpcSubscriber {
+        GrpcSubscriber::new("https://test.grpc.shyft.to".to_string(), None, vec![wallet])
+    }
+
+    fn instruction_slots(
+        account_indices: &[u8],
+        all_account_keys: &[Pubkey],
+    ) -> Vec<Option<Pubkey>> {
+        account_indices
+            .iter()
+            .map(|&idx| all_account_keys.get(idx as usize).copied())
+            .collect()
+    }
+
     #[test]
     fn test_pumpfun_buy_discriminator() {
         let sub = make_subscriber();
@@ -1466,6 +1622,8 @@ mod tests {
         assert!(sub.detect_buy_or_sell(&data, &TradeType::PumpSwap, &[], &[]));
         assert!(sub.detect_buy_or_sell(&data, &TradeType::RaydiumAmm, &[], &[]));
         assert!(sub.detect_buy_or_sell(&data, &TradeType::RaydiumCpmm, &[], &[]));
+        assert!(sub.detect_buy_or_sell(&data, &TradeType::RaydiumClmm, &[], &[]));
+        assert!(sub.detect_buy_or_sell(&data, &TradeType::MeteoraDlmm, &[], &[]));
     }
 
     #[test]
@@ -1484,6 +1642,8 @@ mod tests {
         let pumpswap = Pubkey::from_str(PUMPSWAP_PROGRAM).unwrap();
         let raydium_amm = Pubkey::from_str(RAYDIUM_AMM_V4).unwrap();
         let raydium_cpmm = Pubkey::from_str(RAYDIUM_CPMM).unwrap();
+        let raydium_clmm = Pubkey::from_str(RAYDIUM_CLMM).unwrap();
+        let meteora_dlmm = Pubkey::from_str(METEORA_DLMM).unwrap();
 
         assert_eq!(
             GrpcSubscriber::select_preferred_trade_type(&[pumpswap]),
@@ -1497,6 +1657,28 @@ mod tests {
             GrpcSubscriber::select_preferred_trade_type(&[raydium_cpmm]),
             Some(TradeType::RaydiumCpmm)
         );
+        assert_eq!(
+            GrpcSubscriber::select_preferred_trade_type(&[raydium_clmm]),
+            Some(TradeType::RaydiumClmm)
+        );
+        assert_eq!(
+            GrpcSubscriber::select_preferred_trade_type(&[meteora_dlmm]),
+            Some(TradeType::MeteoraDlmm)
+        );
+    }
+
+    #[test]
+    fn clmm_and_dlmm_non_swap_discriminators_are_ignored() {
+        let data = [1u8; 24];
+
+        assert!(!GrpcSubscriber::is_supported_external_swap_instruction(
+            &TradeType::RaydiumClmm,
+            &data
+        ));
+        assert!(!GrpcSubscriber::is_supported_external_swap_instruction(
+            &TradeType::MeteoraDlmm,
+            &data
+        ));
     }
 
     #[test]
@@ -1542,8 +1724,126 @@ mod tests {
                 &instruction_account_slots,
                 &[],
                 Some(&token_mint),
+                None,
             ),
             Some(token_2022)
+        );
+    }
+
+    #[test]
+    fn raydium_clmm_layout_extracts_buy_direction_mint_and_token_program() {
+        let wallet = Pubkey::new_unique();
+        let sub = make_subscriber_with_wallet(wallet);
+        let wsol = Pubkey::from_str(WSOL_MINT).unwrap();
+        let token_mint = Pubkey::new_unique();
+        let token_program =
+            Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+        let token_2022 = Pubkey::from_str(TOKEN_2022_PROGRAM).unwrap();
+        let wsol_ata = spl_associated_token_account::get_associated_token_address(&wallet, &wsol);
+        let token_2022_ata =
+            spl_associated_token_account::get_associated_token_address_with_program_id(
+                &wallet,
+                &token_mint,
+                &token_2022,
+            );
+        let all_account_keys = vec![
+            wallet,
+            Pubkey::new_unique(),
+            wsol_ata,
+            token_2022_ata,
+            wsol,
+            token_mint,
+            token_program,
+            token_2022,
+        ];
+        let account_indices = vec![0, 1, 1, 2, 3, 1, 1, 1, 6, 7, 1, 4, 5];
+        let mut data = vec![0u8; 41];
+        data[..8].copy_from_slice(&RAYDIUM_CLMM_SWAP_V2);
+        data[8..16].copy_from_slice(&1_000_000u64.to_le_bytes());
+
+        assert!(sub.detect_buy_or_sell(
+            &data,
+            &TradeType::RaydiumClmm,
+            &account_indices,
+            &all_account_keys
+        ));
+
+        let slots = instruction_slots(&account_indices, &all_account_keys);
+        assert_eq!(
+            GrpcSubscriber::extract_token_mint(&TradeType::RaydiumClmm, &slots),
+            Some(token_mint)
+        );
+        assert_eq!(
+            GrpcSubscriber::extract_token_program(
+                &TradeType::RaydiumClmm,
+                &slots,
+                &all_account_keys,
+                Some(&token_mint),
+                Some(&wallet),
+            ),
+            Some(token_2022)
+        );
+        assert_eq!(
+            GrpcSubscriber::extract_buy_lamports(&TradeType::RaydiumClmm, &data),
+            1_000_000
+        );
+    }
+
+    #[test]
+    fn meteora_dlmm_layout_extracts_buy_direction_mint_and_token_program() {
+        let wallet = Pubkey::new_unique();
+        let sub = make_subscriber_with_wallet(wallet);
+        let wsol = Pubkey::from_str(WSOL_MINT).unwrap();
+        let token_mint = Pubkey::new_unique();
+        let token_program =
+            Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+        let token_2022 = Pubkey::from_str(TOKEN_2022_PROGRAM).unwrap();
+        let wsol_ata = spl_associated_token_account::get_associated_token_address(&wallet, &wsol);
+        let token_ata = spl_associated_token_account::get_associated_token_address_with_program_id(
+            &wallet,
+            &token_mint,
+            &token_2022,
+        );
+        let all_account_keys = vec![
+            wallet,
+            Pubkey::new_unique(),
+            wsol_ata,
+            token_ata,
+            wsol,
+            token_mint,
+            token_program,
+            token_2022,
+        ];
+        let account_indices = vec![1, 1, 1, 1, 2, 3, 4, 5, 1, 1, 0, 6, 7, 1, 1, 1];
+        let mut data = vec![0u8; 24];
+        data[..8].copy_from_slice(&METEORA_DLMM_SWAP2);
+        data[8..16].copy_from_slice(&2_000_000u64.to_le_bytes());
+
+        assert!(sub.detect_buy_or_sell(
+            &data,
+            &TradeType::MeteoraDlmm,
+            &account_indices,
+            &all_account_keys
+        ));
+
+        let slots = instruction_slots(&account_indices, &all_account_keys);
+        assert_eq!(
+            GrpcSubscriber::extract_token_mint(&TradeType::MeteoraDlmm, &slots),
+            Some(token_mint)
+        );
+        assert_eq!(
+            GrpcSubscriber::extract_token_program(
+                &TradeType::MeteoraDlmm,
+                &slots,
+                &all_account_keys,
+                Some(&token_mint),
+                Some(&wallet),
+            ),
+            Some(token_2022)
+        );
+        assert_eq!(
+            GrpcSubscriber::extract_buy_lamports(&TradeType::MeteoraDlmm, &data),
+            2_000_000
         );
     }
 }
