@@ -18,8 +18,8 @@ pub const DEFAULT_EXTERNAL_BUY_SOL: f64 = 0.002;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ExternalMode {
-    #[default]
     Off,
+    #[default]
     DryRun,
     Live,
 }
@@ -117,7 +117,7 @@ impl CopyGroup {
             zero_slot_tip_lamports: config.zero_slot_tip_lamports,
             entry_mode: ENTRY_MODE_SMART_BUY,
             sell_mode: SELL_MODE_TP_SL,
-            external_mode: ExternalMode::Off,
+            external_mode: ExternalMode::DryRun,
             external_buy_sol_amount: DEFAULT_EXTERNAL_BUY_SOL,
             external_pumpswap_enabled: true,
             external_raydium_amm_enabled: true,
@@ -146,12 +146,7 @@ impl CopyGroup {
             return false;
         }
 
-        match trade_type {
-            TradeType::Pumpfun => false,
-            TradeType::PumpSwap => self.external_pumpswap_enabled,
-            TradeType::RaydiumAmm => self.external_raydium_amm_enabled,
-            TradeType::RaydiumCpmm => self.external_raydium_cpmm_enabled,
-        }
+        !matches!(trade_type, TradeType::Pumpfun)
     }
 
     pub fn buy_on_smart_buy(&self) -> bool {
@@ -640,28 +635,46 @@ mod tests {
     }
 
     #[test]
-    fn external_settings_default_to_off_with_small_buy_amount() {
+    fn external_settings_default_to_dry_run_with_small_buy_amount() {
         let group = CopyGroup::from_app_config(&test_config());
 
-        assert_eq!(group.external_mode, ExternalMode::Off);
+        assert_eq!(group.external_mode, ExternalMode::DryRun);
         assert_eq!(group.external_buy_sol_amount, 0.002);
         assert!(group.external_pumpswap_enabled);
         assert!(group.external_raydium_amm_enabled);
         assert!(group.external_raydium_cpmm_enabled);
-    }
-
-    #[test]
-    fn external_venue_gate_respects_mode_and_enabled_flags() {
-        let mut group = CopyGroup::from_app_config(&test_config());
-        assert!(!group.accepts_external_trade_type(TradeType::PumpSwap));
-
-        group.external_mode = ExternalMode::DryRun;
         assert!(group.accepts_external_trade_type(TradeType::PumpSwap));
         assert!(group.accepts_external_trade_type(TradeType::RaydiumAmm));
         assert!(group.accepts_external_trade_type(TradeType::RaydiumCpmm));
         assert!(!group.accepts_external_trade_type(TradeType::Pumpfun));
+    }
 
-        group.external_pumpswap_enabled = false;
+    #[test]
+    fn persisted_group_missing_external_mode_defaults_to_dry_run() {
+        let group = CopyGroup::from_app_config(&test_config());
+        let raw = serde_json::to_string(&PersistedGroup::from(&group)).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        value.as_object_mut().unwrap().remove("external_mode");
+
+        let persisted: PersistedGroup = serde_json::from_value(value).unwrap();
+
+        assert_eq!(persisted.external_mode, ExternalMode::DryRun);
+    }
+
+    #[test]
+    fn external_venue_gate_is_unified_by_mode() {
+        let mut group = CopyGroup::from_app_config(&test_config());
+        group.external_mode = ExternalMode::Off;
         assert!(!group.accepts_external_trade_type(TradeType::PumpSwap));
+
+        group.external_mode = ExternalMode::DryRun;
+        group.external_pumpswap_enabled = false;
+        group.external_raydium_amm_enabled = false;
+        group.external_raydium_cpmm_enabled = false;
+
+        assert!(group.accepts_external_trade_type(TradeType::PumpSwap));
+        assert!(group.accepts_external_trade_type(TradeType::RaydiumAmm));
+        assert!(group.accepts_external_trade_type(TradeType::RaydiumCpmm));
+        assert!(!group.accepts_external_trade_type(TradeType::Pumpfun));
     }
 }

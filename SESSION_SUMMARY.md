@@ -8,15 +8,13 @@
 
 ## Current Progress
 - Added group-level external settings with serde defaults:
-  - `external_mode`: `off`, `dry_run`, `live`
+  - `external_mode`: `off`, `dry_run`, `live`; default is now `dry_run`
   - `external_buy_sol_amount`: default `0.002`
-  - per-venue flags for PumpSwap, Raydium AMM, Raydium CPMM
+  - old per-venue fields are retained for `copy_groups.json` compatibility but no longer split external routing
 - Added Telegram setting support:
   - `/set <group> external off|dry_run|live`
   - `/set <group> external_buy 0.002`
-  - `/set <group> external_pumpswap on|off`
-  - `/set <group> external_raydium_amm on|off`
-  - `/set <group> external_raydium_cpmm on|off`
+  - the Telegram setting menu exposes one external mode control; PumpSwap, Raydium AMM, and Raydium CPMM are enabled or disabled together by `external_mode`
 - Split transaction detection into internal and external parse scopes:
   - Pump.fun is parsed first.
   - External venues are parsed only after internal parsing fails.
@@ -33,6 +31,12 @@
   - Added Pump AMM account layout support: token mint from instruction slots `3/4`, token program from slots `11/12`.
   - Added Pump AMM discriminator handling so sell instructions are not misclassified as buys.
   - Bumped version from `1.8.2` to `1.8.3`.
+- Follow-up simplification after user requested one external switch:
+  - New groups and missing `external_mode` fields default to `dry_run`.
+  - `external_mode=off` disables all external venues.
+  - `external_mode=dry_run` or `live` enables PumpSwap, Raydium AMM, and Raydium CPMM together.
+  - Removed separate PumpSwap/Raydium AMM/Raydium CPMM buttons and shortcut setting keys from the Telegram menu/help.
+  - Bumped version from `1.8.3` to `1.8.4`.
 
 ## Files Changed
 - `Cargo.toml`
@@ -53,6 +57,12 @@
   - `Cargo.lock`
   - `src/grpc/subscriber.rs`
   - `SESSION_SUMMARY.md`
+- Latest external switch simplification changed:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `src/groups.rs`
+  - `src/telegram.rs`
+  - `SESSION_SUMMARY.md`
 - Existing local diffs/formatting were preserved in:
   - `src/grpc/account_subscriber.rs`
   - `src/grpc/mod.rs`
@@ -61,11 +71,12 @@
   - `src/utils/token_info.rs`
 
 ## Validation
-- `cargo fmt --check` passed.
+- `cargo fmt --check` passed for version `1.8.4`.
 - `cargo metadata --format-version 1 --no-deps` passed and reports:
-  - package version `1.8.3`
+  - package version `1.8.4`
   - binary target `copy-trader`
 - `git diff --check` passed with only Windows line-ending warnings.
+- `cargo test external --bin copy-trader` on Windows failed before project source checks in `protobuf-src` because this local environment lacks `sh`.
 - `cargo check --bin copy-trader` on Windows failed before project source checks in `protobuf-src` because this local environment lacks `sh`.
 - `cargo test pump_amm --bin copy-trader` on Windows hit the same `protobuf-src` / missing `sh` blocker before test compilation.
 - Production validation must come from GitHub Actions Ubuntu build.

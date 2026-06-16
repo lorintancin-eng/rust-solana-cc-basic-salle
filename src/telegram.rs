@@ -792,7 +792,7 @@ impl TgBot {
 <code>/sellall [group_id]</code> 手动全卖\n\
 <code>/stats</code> 查看运行统计\n\
 <code>/gstats</code> 查看组合绩效\n\n\
-支持快捷设置的参数键：<code>buy</code>、<code>min_buy</code>、<code>tp</code>、<code>sl</code>、<code>trailing</code>、<code>slippage</code>、<code>sell_slippage</code>、<code>consensus</code>、<code>hold</code>、<code>tip_buy</code>、<code>tip_sell</code>、<code>zero_slot_tip</code>、<code>buy_mode</code>、<code>mode</code>、<code>enabled</code>、<code>external</code>、<code>external_buy</code>、<code>external_pumpswap</code>、<code>external_raydium_amm</code>、<code>external_raydium_cpmm</code>",
+支持快捷设置的参数键：<code>buy</code>、<code>min_buy</code>、<code>tp</code>、<code>sl</code>、<code>trailing</code>、<code>slippage</code>、<code>sell_slippage</code>、<code>consensus</code>、<code>hold</code>、<code>tip_buy</code>、<code>tip_sell</code>、<code>zero_slot_tip</code>、<code>buy_mode</code>、<code>mode</code>、<code>enabled</code>、<code>external</code>、<code>external_buy</code>",
             group_menu_keyboard_v2(self.groups.zero_slot_buy_enabled()),
         )
         .await;
@@ -1411,6 +1411,10 @@ fn apply_group_setting_value(
 
         "external" | "external_mode" => value.parse::<ExternalMode>().map(|mode| {
             group.external_mode = mode;
+            let enabled = mode.is_enabled();
+            group.external_pumpswap_enabled = enabled;
+            group.external_raydium_amm_enabled = enabled;
+            group.external_raydium_cpmm_enabled = enabled;
             format!("External mode = {}", mode.label())
         }),
         "external_buy" | "external_buy_sol" => value
@@ -1420,24 +1424,6 @@ fn apply_group_setting_value(
                 format!("External buy = {} SOL", group.external_buy_sol_amount)
             })
             .map_err(|err| err.to_string()),
-        "external_pumpswap" => parse_bool_flag(value).map(|enabled| {
-            group.external_pumpswap_enabled = enabled;
-            format!("External PumpSwap = {}", if enabled { "on" } else { "off" })
-        }),
-        "external_raydium_amm" => parse_bool_flag(value).map(|enabled| {
-            group.external_raydium_amm_enabled = enabled;
-            format!(
-                "External Raydium AMM = {}",
-                if enabled { "on" } else { "off" }
-            )
-        }),
-        "external_raydium_cpmm" => parse_bool_flag(value).map(|enabled| {
-            group.external_raydium_cpmm_enabled = enabled;
-            format!(
-                "External Raydium CPMM = {}",
-                if enabled { "on" } else { "off" }
-            )
-        }),
         _ => Err(format!("未知参数键: {}", key)),
     }
 }
@@ -1520,9 +1506,6 @@ fn setting_label(key: &str) -> &'static str {
         "mode" => "卖出模式",
         "external" | "external_mode" => "外盘模式",
         "external_buy" | "external_buy_sol" => "外盘买入金额",
-        "external_pumpswap" => "外盘 PumpSwap",
-        "external_raydium_amm" => "外盘 Raydium AMM",
-        "external_raydium_cpmm" => "外盘 Raydium CPMM",
         _ => "参数",
     }
 }
@@ -1546,9 +1529,6 @@ fn setting_custom_hint(group: &CopyGroup, key: &str) -> String {
         "enabled" => "on",
         "external" => "dry_run",
         "external_buy" => "0.002",
-        "external_pumpswap" => "on",
-        "external_raydium_amm" => "on",
-        "external_raydium_cpmm" => "on",
         _ => "value",
     };
 
@@ -1686,13 +1666,6 @@ fn group_setting_menu_keyboard(group: &CopyGroup) -> serde_json::Value {
                 {"text": "外盘买入", "callback_data": format!("gm:key:{}:external_buy", group.id)}
             ],
             [
-                {"text": "PumpSwap", "callback_data": format!("gm:key:{}:external_pumpswap", group.id)},
-                {"text": "Raydium AMM", "callback_data": format!("gm:key:{}:external_raydium_amm", group.id)}
-            ],
-            [
-                {"text": "Raydium CPMM", "callback_data": format!("gm:key:{}:external_raydium_cpmm", group.id)}
-            ],
-            [
                 {"text": "查看组合", "callback_data": format!("gm:view:{}", group.id)},
                 {"text": "返回菜单", "callback_data": "gm:main"}
             ]
@@ -1770,9 +1743,6 @@ fn group_setting_value_keyboard(group_id: &str, key: &str) -> serde_json::Value 
             key,
             &[("0.002 SOL", "0.002"), ("0.005 SOL", "0.005")],
         )],
-        "external_pumpswap" | "external_raydium_amm" | "external_raydium_cpmm" => {
-            vec![value_row(group_id, key, &[("on", "on"), ("off", "off")])]
-        }
         _ => vec![value_row(group_id, key, &[("默认", "0")])],
     };
 
@@ -1899,9 +1869,6 @@ fn group_value_text(group: &CopyGroup, key: &str) -> String {
         "external_buy" | "external_buy_sol" => {
             format!("{} SOL", group.external_buy_sol_amount)
         }
-        "external_pumpswap" => on_off(group.external_pumpswap_enabled).to_string(),
-        "external_raydium_amm" => on_off(group.external_raydium_amm_enabled).to_string(),
-        "external_raydium_cpmm" => on_off(group.external_raydium_cpmm_enabled).to_string(),
         _ => "-".to_string(),
     }
 }
@@ -2024,13 +1991,6 @@ fn group_setting_menu_keyboard_v2(group: &CopyGroup) -> serde_json::Value {
                 {"text": "外盘买入", "callback_data": format!("gm:key:{}:external_buy", group.id)}
             ],
             [
-                {"text": "PumpSwap", "callback_data": format!("gm:key:{}:external_pumpswap", group.id)},
-                {"text": "Raydium AMM", "callback_data": format!("gm:key:{}:external_raydium_amm", group.id)}
-            ],
-            [
-                {"text": "Raydium CPMM", "callback_data": format!("gm:key:{}:external_raydium_cpmm", group.id)}
-            ],
-            [
                 {"text": "查看组合", "callback_data": format!("gm:view:{}", group.id)},
                 {"text": "返回菜单", "callback_data": "gm:main"}
             ]
@@ -2109,12 +2069,9 @@ fn format_group_compact_v2(group: &CopyGroup) -> String {
 
 fn format_external_group_status(group: &CopyGroup) -> String {
     format!(
-        "\nExternal mode: {}\nExternal buy: {} SOL\nExternal venues: PumpSwap={} | Raydium AMM={} | Raydium CPMM={}",
+        "\nExternal mode: {}\nExternal buy: {} SOL\nExternal venues: unified by external mode",
         group.external_mode.label(),
         group.external_buy_sol_amount,
-        on_off(group.external_pumpswap_enabled),
-        on_off(group.external_raydium_amm_enabled),
-        on_off(group.external_raydium_cpmm_enabled),
     )
 }
 
@@ -2174,9 +2131,6 @@ fn setting_label_v2(key: &str) -> &'static str {
         "mode" => "卖出模式",
         "external" | "external_mode" => "外盘模式",
         "external_buy" | "external_buy_sol" => "外盘买入金额",
-        "external_pumpswap" => "外盘 PumpSwap",
-        "external_raydium_amm" => "外盘 Raydium AMM",
-        "external_raydium_cpmm" => "外盘 Raydium CPMM",
         _ => "参数",
     }
 }
@@ -2375,14 +2329,18 @@ mod tests {
 
         apply_group_setting_value(&mut group, "external", "dry_run").unwrap();
         apply_group_setting_value(&mut group, "external_buy", "0.005").unwrap();
-        apply_group_setting_value(&mut group, "external_pumpswap", "off").unwrap();
-        apply_group_setting_value(&mut group, "external_raydium_amm", "on").unwrap();
-        apply_group_setting_value(&mut group, "external_raydium_cpmm", "off").unwrap();
 
         assert_eq!(group.external_mode, ExternalMode::DryRun);
         assert_eq!(group.external_buy_sol_amount, 0.005);
-        assert!(!group.external_pumpswap_enabled);
+        assert!(group.external_pumpswap_enabled);
         assert!(group.external_raydium_amm_enabled);
+        assert!(group.external_raydium_cpmm_enabled);
+
+        apply_group_setting_value(&mut group, "external", "off").unwrap();
+
+        assert_eq!(group.external_mode, ExternalMode::Off);
+        assert!(!group.external_pumpswap_enabled);
+        assert!(!group.external_raydium_amm_enabled);
         assert!(!group.external_raydium_cpmm_enabled);
     }
 }
